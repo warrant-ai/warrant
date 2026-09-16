@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "warrantai"
+version = "0.0.1"
+description = "Warrant: the decision ledger for AI agents. Record every consequential agent action with its mandate, evidence, cost and outcome, and replay real decisions before you ship a change."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+authors = [{ name = "AI Foundry Ventures" }]
+keywords = ["ai-agents", "audit", "decision-records", "governance", "llm", "observability", "policy"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Software Development :: Libraries",
+  "Topic :: System :: Logging",
+]
+dependencies = ["jsonschema>=4.18"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "build>=1.2"]
+
+[project.scripts]
+warrant = "warrant.cli:main"
+
+[project.urls]
+Homepage = "https://warrantai.dev"
+Source = "https://github.com/warrant-ai/warrant"
+Issues = "https://github.com/warrant-ai/warrant/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/warrant"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/warrant", "tests", "README.md", "LICENSE", "pyproject.toml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

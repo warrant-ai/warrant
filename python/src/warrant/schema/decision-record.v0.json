@@ -1,0 +1,166 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://warrantai.dev/schema/decision-record.v0.json",
+  "title": "Warrant decision record",
+  "description": "One consequential action taken by an AI agent, with the mandate that allowed it, the evidence used, the cost, and the outcome once known. Records are append-only; outcomes, human verdicts and corrections are separate records that reference the original decision.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["record_id", "record_type", "tenant", "stream", "timestamp", "schema_version", "origin"],
+  "properties": {
+    "record_id": { "$ref": "#/$defs/ulid" },
+    "record_type": {
+      "type": "string",
+      "enum": ["decision", "outcome", "human_verdict", "correction"]
+    },
+    "tenant": { "type": "string", "minLength": 1 },
+    "stream": { "type": "string", "minLength": 1 },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "sequence": { "type": "integer", "minimum": 0 },
+    "schema_version": { "type": "string", "const": "0" },
+    "origin": {
+      "type": "string",
+      "enum": ["live", "imported"],
+      "description": "live: emitted by the SDK at decision time. imported: reconstructed from an existing trace export by `warrant import`; never presented as sealed live evidence."
+    },
+    "references": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decision_record_id"],
+      "properties": {
+        "decision_record_id": { "$ref": "#/$defs/ulid" }
+      }
+    },
+    "actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 },
+        "instance": { "type": "string" },
+        "on_behalf_of": { "type": "string", "description": "The human or system principal the agent acts for." }
+      }
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["class", "action", "subject"],
+      "properties": {
+        "class": { "type": "string", "pattern": "^[a-z0-9_]+(\\.[a-z0-9_]+)*$", "description": "Customer-defined taxonomy, e.g. credit.approve" },
+        "action": { "type": "string", "minLength": 1 },
+        "subject": { "type": "string", "minLength": 1 },
+        "summary": { "type": "string" },
+        "alternatives": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "mandate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["result"],
+      "properties": {
+        "policy_id": { "type": "string" },
+        "policy_version": { "type": "string" },
+        "clause": { "type": "string" },
+        "result": { "type": "string", "enum": ["allow", "deny", "escalate", "unchecked"] }
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "uri", "content_hash"],
+        "properties": {
+          "type": { "type": "string", "enum": ["model_call", "tool_call", "document", "web", "other"] },
+          "uri": { "type": "string", "minLength": 1 },
+          "content_hash": { "$ref": "#/$defs/sha256" },
+          "retrieved_at": { "type": "string", "format": "date-time" },
+          "excerpt": { "type": "string", "description": "Opt-in, redacted before leaving the process." }
+        }
+      }
+    },
+    "human": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["required"],
+      "properties": {
+        "required": { "type": "boolean" },
+        "reviewer": { "type": "string" },
+        "verdict": { "type": "string", "enum": ["approve", "reject", "amend"] },
+        "at": { "type": "string", "format": "date-time" },
+        "note": { "type": "string" }
+      }
+    },
+    "cost": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["amount", "currency"],
+      "properties": {
+        "amount": { "type": "number", "minimum": 0 },
+        "currency": { "type": "string", "pattern": "^[A-Z]{3}$" },
+        "cost_centre": { "type": "string" },
+        "breakdown": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "amount"],
+            "properties": {
+              "kind": { "type": "string", "enum": ["model_call", "tool_call", "other"] },
+              "provider": { "type": "string" },
+              "model": { "type": "string" },
+              "tokens_in": { "type": "integer", "minimum": 0 },
+              "tokens_out": { "type": "integer", "minimum": 0 },
+              "amount": { "type": "number", "minimum": 0 }
+            }
+          }
+        }
+      }
+    },
+    "outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": { "type": "string", "enum": ["pending", "observed"] },
+        "label": { "type": "string" },
+        "score": { "type": "number" },
+        "observed_at": { "type": "string", "format": "date-time" },
+        "source": { "type": "string" }
+      }
+    },
+    "seal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prev_hash", "hash"],
+      "properties": {
+        "prev_hash": { "oneOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }], "description": "null only for the first record in a stream." },
+        "hash": { "$ref": "#/$defs/sha256" },
+        "checkpoint": { "type": "integer", "minimum": 0 },
+        "signature": { "type": "string", "description": "Ed25519 signature over hash, base64." }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "record_type": { "const": "decision" } } },
+      "then": { "required": ["actor", "decision", "mandate"] }
+    },
+    {
+      "if": { "properties": { "record_type": { "const": "outcome" } } },
+      "then": { "required": ["references", "outcome"] }
+    },
+    {
+      "if": { "properties": { "record_type": { "const": "human_verdict" } } },
+      "then": { "required": ["references", "human"] }
+    },
+    {
+      "if": { "properties": { "record_type": { "const": "correction" } } },
+      "then": { "required": ["references"] }
+    }
+  ],
+  "$defs": {
+    "ulid": { "type": "string", "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$" },
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+  }
+}

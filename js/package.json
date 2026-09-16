@@ -1,0 +1,54 @@
+{
+  "name": "warrantai",
+  "version": "0.0.1",
+  "description": "Warrant: the decision ledger for AI agents. Record every consequential agent action with its mandate, evidence, cost and outcome, and replay real decisions before you ship a change.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./schema": "./schema/decision-record.v0.json",
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "warrant": "./bin/warrant.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "schema",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test \"test/**/*.test.js\""
+  },
+  "dependencies": {
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1"
+  },
+  "keywords": [
+    "ai-agents",
+    "audit",
+    "decision-records",
+    "governance",
+    "llm",
+    "observability",
+    "policy"
+  ],
+  "homepage": "https://warrantai.dev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/warrant-ai/warrant.git",
+    "directory": "js"
+  },
+  "bugs": {
+    "url": "https://github.com/warrant-ai/warrant/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

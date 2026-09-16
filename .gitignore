@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+dist/
+build/
+*.egg-info/
+node_modules/
+*.tgz
+.DS_Store
+
+# internal planning material, never for the repository
+/Warrant-PRD-GTM-2.pdf
+/docs/

@@ -1,0 +1,46 @@
+# Publishes both packages on a version tag (v0.0.1). No stored registry tokens:
+# PyPI uses trusted publishing (configure the publisher on pypi.org for
+# warrant-ai/warrant, workflow release.yml, environment pypi) and npm uses
+# provenance with a granular token in NPM_TOKEN until npm trusted publishing
+# is enabled for the org.
+name: release
+on:
+  push:
+    tags: ["v*"]
+jobs:
+  pypi:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build
+      - run: python -m build --outdir dist python
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+  npm:
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+        working-directory: js
+      - run: npm test
+        working-directory: js
+      - run: npm publish --provenance --access public
+        working-directory: js
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

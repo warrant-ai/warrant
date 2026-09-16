@@ -1,0 +1,105 @@
+{
+  "record_id": "01K5A3Q7Z2XV8M9N4B6C1D0E2F",
+  "record_type": "decision",
+  "tenant": "demo-bank",
+  "stream": "lending",
+  "timestamp": "2026-09-16T10:42:17Z",
+  "sequence": 18204,
+  "schema_version": "0",
+  "origin": "live",
+  "actor": {
+    "name": "credit-underwriter",
+    "version": "2.3.1",
+    "instance": "demo-bank-prod",
+    "on_behalf_of": "branch:jayanagar"
+  },
+  "decision": {
+    "class": "credit.approve",
+    "action": "approve",
+    "subject": "LN-20431",
+    "summary": "Approve personal loan LN-20431 at INR 4,50,000, 36 months",
+    "alternatives": [
+      "refer",
+      "decline"
+    ]
+  },
+  "mandate": {
+    "policy_id": "CR-07",
+    "policy_version": "2026.3",
+    "clause": "4.2",
+    "result": "allow"
+  },
+  "evidence": [
+    {
+      "type": "tool_call",
+      "uri": "cibil://req/88213",
+      "content_hash": "8f6d2c0e4a1b9c3d5e7f0a2b4c6d8e1f3a5b7c9d0e2f4a6b8c1d3e5f7a9b0c2d",
+      "retrieved_at": "2026-09-16T10:42:03Z",
+      "excerpt": "score 748"
+    },
+    {
+      "type": "document",
+      "uri": "lms://LN-20431/bank-statement-6m",
+      "content_hash": "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809",
+      "excerpt": "FOIR 38%"
+    },
+    {
+      "type": "tool_call",
+      "uri": "kyc://match/LN-20431",
+      "content_hash": "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0",
+      "excerpt": "match 0.97"
+    }
+  ],
+  "human": {
+    "required": false
+  },
+  "cost": {
+    "amount": 3.84,
+    "currency": "INR",
+    "cost_centre": "retail-lending",
+    "breakdown": [
+      {
+        "kind": "model_call",
+        "provider": "anthropic",
+        "model": "claude-sonnet-5",
+        "tokens_in": 6120,
+        "tokens_out": 410,
+        "amount": 2.11
+      },
+      {
+        "kind": "model_call",
+        "provider": "anthropic",
+        "model": "claude-sonnet-5",
+        "tokens_in": 2040,
+        "tokens_out": 180,
+        "amount": 0.73
+      },
+      {
+        "kind": "model_call",
+        "provider": "anthropic",
+        "model": "claude-haiku-4-5-20251001",
+        "tokens_in": 900,
+        "tokens_out": 60,
+        "amount": 0.1
+      },
+      {
+        "kind": "tool_call",
+        "provider": "cibil",
+        "amount": 0.75
+      },
+      {
+        "kind": "tool_call",
+        "provider": "kyc-vendor",
+        "amount": 0.15
+      }
+    ]
+  },
+  "outcome": {
+    "status": "pending"
+  },
+  "seal": {
+    "prev_hash": "9f3a7b2c1d0e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7ec21e",
+    "hash": "4b07c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8e8d2",
+    "checkpoint": 18204
+  }
+}

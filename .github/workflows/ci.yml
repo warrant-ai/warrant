@@ -1,0 +1,42 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  schema-in-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          cmp schema/decision-record.v0.json python/src/warrant/schema/decision-record.v0.json
+          cmp schema/decision-record.v0.json js/schema/decision-record.v0.json
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.9", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e "python[dev]"
+      - run: pytest python
+      - run: python -m build --outdir dist python
+  js:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [18, 20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm ci
+        working-directory: js
+      - run: npm test
+        working-directory: js
+      - run: npm pack --dry-run
+        working-directory: js
