@@ -11,7 +11,7 @@
     "./package.json": "./package.json"
   },
   "bin": {
-    "warrant": "./bin/warrant.js"
+    "warrant": "bin/warrant.js"
   },
   "files": [
     "bin",
