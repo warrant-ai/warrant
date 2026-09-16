@@ -2,7 +2,7 @@
 
 The decision ledger for AI agents. Every consequential action an agent takes is recorded with the mandate that allowed it, the evidence it used, what it cost, and how it turned out. Developers replay real recorded decisions against a changed prompt, model or policy before shipping. Risk, finance and audit teams get records they can sample and verify without trusting the vendor.
 
-Status: pre-alpha. Release 0.0.1 publishes the decision record schema and a validator in Python and JavaScript so the format can be reviewed before the SDK lands.
+Status: pre-alpha. 0.0.1 published the decision record schema and validators. The 0.1.0 line adds the Python `decide()` SDK, the local append-only store and the offline verifier; see `python/README.md`.
 
 | Package | Install | Import |
 |---|---|---|

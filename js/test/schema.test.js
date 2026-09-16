@@ -13,8 +13,8 @@ async function example(name) {
   return JSON.parse(await readFile(join(ROOT, "examples", name), "utf8"));
 }
 
-test("version and schema version are set", () => {
-  assert.equal(VERSION, "0.0.1");
+test("version and schema version are set", async () => {
+  assert.equal(VERSION, JSON.parse(await readFile(join(ROOT, "js", "package.json"), "utf8")).version);
   assert.equal(SCHEMA_VERSION, "0");
 });
 

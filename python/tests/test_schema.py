@@ -13,8 +13,10 @@ def _example(name: str) -> dict:
     return json.loads((EXAMPLES / name).read_text(encoding="utf-8"))
 
 
-def test_version_is_set():
-    assert __version__ == "0.0.1"
+def test_version_matches_installed_metadata():
+    from importlib.metadata import version
+
+    assert __version__ == version("warrantai")
     assert SCHEMA_VERSION == "0"
 
 

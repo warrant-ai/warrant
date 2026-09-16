@@ -24,7 +24,7 @@ async function cli(...args) {
 test("--version prints version and schema version", async () => {
   const { code, stdout } = await cli("--version");
   assert.equal(code, 0);
-  assert.match(stdout, /^warrant 0\.0\.1 \(schema v0\)/);
+  assert.match(stdout, /^warrant \d+\.\d+\.\d+\S* \(schema v0\)/);
 });
 
 test("schema prints the schema", async () => {
