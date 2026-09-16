@@ -1,8 +1,6 @@
 # Publishes both packages on a version tag (v0.0.1). No stored registry tokens:
-# PyPI uses trusted publishing (configure the publisher on pypi.org for
-# warrant-ai/warrant, workflow release.yml, environment pypi) and npm uses
-# provenance with a granular token in NPM_TOKEN until npm trusted publishing
-# is enabled for the org.
+# both PyPI and npm use trusted publishing (OIDC) bound to this repository,
+# this workflow file, and the environments `pypi` and `npm`.
 name: release
 on:
   push:
@@ -36,11 +34,11 @@ jobs:
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
+      # npm trusted publishing needs npm 11.5.1 or newer; Node 22 ships npm 10.
+      - run: npm install -g npm@latest
       - run: npm ci
         working-directory: js
       - run: npm test
         working-directory: js
-      - run: npm publish --provenance --access public
+      - run: npm publish --access public
         working-directory: js
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
