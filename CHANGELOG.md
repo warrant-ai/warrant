@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.1.0 (2026-09-17)
 
 The v0.1 preview: everything a developer needs to record decisions locally, check them against policy, replay them against a change, and start from traces they already have.
 
