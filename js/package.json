@@ -24,7 +24,7 @@
     "node": ">=18"
   },
   "scripts": {
-    "test": "node --test \"test/**/*.test.js\""
+    "test": "node --test test/schema.test.js test/cli.test.js"
   },
   "dependencies": {
     "ajv": "^8.17.1",
