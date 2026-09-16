@@ -249,9 +249,15 @@ def _cmd_target_add(args: argparse.Namespace) -> int:
     except (ValueError, json.JSONDecodeError) as exc:
         print(f"{path}: {exc}", file=sys.stderr)
         return 1
-    targets[args.name] = Target(args.name, agent, model=args.model, policy=args.policy, decider=args.decider)
+    try:
+        params = _parse_kv(args.param or [])
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    targets[args.name] = Target(args.name, agent, model=args.model, policy=args.policy, decider=args.decider, params=params)
     save_targets(path, targets)
-    print(f"target {args.name}: {agent.name}@{agent.version}, model {args.model or '-'}, policy {args.policy or '-'}, decider {args.decider or '-'}")
+    extra = f", params {params}" if params else ""
+    print(f"target {args.name}: {agent.name}@{agent.version}, model {args.model or '-'}, policy {args.policy or '-'}, decider {args.decider or '-'}{extra}")
     return 0
 
 
@@ -304,6 +310,50 @@ def _cmd_test(args: argparse.Namespace) -> int:
             fh.write(report.to_junit())
         print(f"# junit report: {args.junit}")
     return 0 if report.passed else 1
+
+
+def _cmd_import(args: argparse.Namespace) -> int:
+    from warrant.importer import Taxonomy, TaxonomyError, import_traces
+
+    try:
+        taxonomy = Taxonomy.load(args.taxonomy)
+    except FileNotFoundError:
+        print(f"{args.taxonomy}: file not found", file=sys.stderr)
+        return 1
+    except (TaxonomyError, ImportError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    policy = None
+    label = None
+    if args.policy:
+        bundle, error = _load_bundle(args.policy)
+        if bundle is None:
+            print(error, file=sys.stderr)
+            return 1
+        from warrant.policy import CelPolicyEngine
+
+        policy = CelPolicyEngine(bundle)
+        label = ", ".join(f"{p.policy_id}@{p.version}" for p in bundle.policies)
+    store = None
+    if not args.dry_run:
+        store = SQLiteStore(args.store)
+    try:
+        report = import_traces(args.files, taxonomy, store=store, policy=policy, policy_label=label, stream=args.stream)
+    except FileNotFoundError as exc:
+        print(f"{exc.filename}: file not found", file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    finally:
+        if store is not None:
+            store.close()
+    print(report.summary())
+    if args.report:
+        with open(args.report, "w", encoding="utf-8") as fh:
+            json.dump(report.to_dict(), fh, indent=2)
+        print(f"json report: {args.report}")
+    return 0 if report.records else 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -364,6 +414,7 @@ def build_parser() -> argparse.ArgumentParser:
     ta.add_argument("--model", metavar="PROVIDER/MODEL")
     ta.add_argument("--policy", metavar="DIR", help="policy bundle directory")
     ta.add_argument("--decider", metavar="MODULE:FUNCTION", help="the function that makes one decision")
+    ta.add_argument("--param", action="append", metavar="KEY=VALUE", help="free-form parameter the decider can read from target.params (repeatable)")
     ta.set_defaults(func=_cmd_target_add)
     tl = tg_sub.add_parser("list", help="list targets")
     tl.set_defaults(func=_cmd_target_list)
@@ -379,6 +430,16 @@ def build_parser() -> argparse.ArgumentParser:
     te.add_argument("--json", metavar="FILE", help="write a JSON report")
     te.add_argument("--junit", metavar="FILE", help="write a JUnit XML report")
     te.set_defaults(func=_cmd_test)
+
+    im = sub.add_parser("import", help="reconstruct decision records from OpenTelemetry trace exports")
+    im.add_argument("files", nargs="+", metavar="FILE", help="OTLP JSON / JSONL or Python SDK console-exporter JSON")
+    im.add_argument("--taxonomy", required=True, metavar="FILE", help="which spans are decisions and how to read them")
+    im.add_argument("--store", default=".warrant/records.db", metavar="PATH")
+    im.add_argument("--stream", metavar="NAME", help="overrides the taxonomy's stream")
+    im.add_argument("--policy", metavar="DIR", help="policy bundle to check each decision against, retrospectively")
+    im.add_argument("--dry-run", action="store_true", help="report only, write nothing")
+    im.add_argument("--report", metavar="FILE", help="write a JSON report")
+    im.set_defaults(func=_cmd_import)
     return parser
 
 

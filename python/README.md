@@ -139,11 +139,44 @@ warrant test lending-edge --against underwriter-v2.4 --mode frozen --fail-on fli
 
 The decider receives the recorded `check()` inputs, or the full payload if live code called `d.set_inputs(payload)`; the subject is `d.subject`. A set is a portable JSONL file of real decisions with their outcomes joined. A target names what changes: agent version, model, policy bundle, and the decider, a `module:function` that makes one decision with the same `d` API as live code. In `frozen` mode `d.tool()` returns the recorded result and only model calls run; in `live` mode tools run again. A decision whose new code calls a tool the recording never saw is reported as unreplayable rather than silently run live. Replayed records never enter the ledger. Gates: `--fail-on flipped,new-deny,new-escalate,unreplayable` and `--max-cost-increase PCT`; a decider that raises always fails the run. Reports as JSON and JUnit for CI.
 
+## Import: start from the traces you already have
+
+If your agents already emit OpenTelemetry generative-AI spans, you do not have to instrument anything to get a first finding. A taxonomy names which side-effecting tool spans are decisions and how to read the subject, action and inputs from their attributes:
+
+```yaml
+# taxonomy.yaml
+stream: lending-import
+agent: {name_attr: service.name, version_attr: service.version}
+pricing: {anthropic/claude-sonnet-5: {input_per_1k: 0.25, output_per_1k: 1.25}}
+decisions:
+  - class: credit.approve
+    match: {tool: approve_loan}
+    subject: gen_ai.tool.call.arguments.loan_id
+    action: approve
+    inputs: gen_ai.tool.call.arguments
+```
+
+```
+warrant import traces.jsonl --taxonomy taxonomy.yaml --store .warrant/records.db --policy ./policies
+```
+
+```
+read 24 span(s) in 6 trace(s) from 1 file(s)
+wrote 6 record(s) to stream 'lending-import' with origin: imported
+  credit.approve: 6 decision(s), 6 with inputs, 6 with model calls checked against COL-02@2026.1, CR-07@2026.3
+    allow 3   deny 1   escalate 2   unchecked 0
+  3 decision(s) outside mandate:
+    LN-30002  escalate  CR-07 clause 4.3  Refer tickets above 5,00,000 to a credit officer
+    LN-30003  deny  CR-07 clause 4.1  Decline below bureau floor
+    LN-30004  escalate  CR-07 default  no clause matched
+```
+
+Accepted inputs are OTLP JSON or JSONL as written by the collector's file exporter, and the Python SDK's console-exporter JSON. Every matched span becomes one record with `origin: imported`; the other generative-AI spans in its trace become evidence by reference, with token usage and, if the taxonomy has a price table, cost. Record ids are derived from the trace and span ids, so importing the same export twice writes nothing new. Imported records are chained like any other, and `origin` keeps them distinguishable from records sealed at decision time. `--dry-run` reports without writing; `--report FILE` writes JSON.
+
 ## What arrives next
 
 - budget envelopes: cost ceilings per decision, workflow and day, enforced through `check()`
 - signed policy bundles published by a policy service and cached by the SDK
-- `warrant import`: reconstruct decision records from existing trace exports and run policy over them retrospectively
 - collector and self-hosted PostgreSQL store
 
 Roadmap and schema specification: https://warrantai.dev

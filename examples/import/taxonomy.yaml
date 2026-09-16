@@ -1,0 +1,15 @@
+# Which spans in an OpenTelemetry export are decisions, and how to read them.
+tenant: demo-bank
+stream: lending-import
+currency: INR
+agent:
+  name_attr: service.name        # resource attributes that identify the agent
+  version_attr: service.version
+pricing:                          # optional; the conventions carry tokens, not money
+  anthropic/claude-sonnet-5: {input_per_1k: 0.25, output_per_1k: 1.25}
+decisions:
+  - class: credit.approve
+    match: {tool: approve_loan}                    # the side-effecting tool call is the decision
+    subject: gen_ai.tool.call.arguments.loan_id    # attribute path; JSON-string attributes are descended into
+    action: approve                                # a constant, or attr:<path>
+    inputs: gen_ai.tool.call.arguments             # inputs for the retrospective policy check

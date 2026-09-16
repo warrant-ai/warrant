@@ -1,0 +1,5 @@
+
+# local workspaces created by the quick start (the gallery keeps its own .warrant on purpose)
+/.warrant/
+/python/.warrant/
+/js/.warrant/

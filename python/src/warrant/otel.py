@@ -25,6 +25,7 @@ import threading
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
 from warrant.client import Decision, current_decision
+from warrant.otel_attrs import classify_attrs, first_attr, to_int
 
 try:
     from opentelemetry.sdk.trace import ReadableSpan, Span, SpanProcessor
@@ -35,10 +36,6 @@ log = logging.getLogger("warrant.otel")
 
 Pricer = Callable[[str, str, int, int], float]
 """``(provider, model, tokens_in, tokens_out) -> amount`` in the client's currency."""
-
-_MODEL_OPERATIONS = ("chat", "text_completion", "generate_content", "embeddings")
-_TOOL_OPERATIONS = ("execute_tool",)
-
 
 class WarrantSpanProcessor(SpanProcessor):
     """Attach generative-AI spans to the decision that was open when they started."""
@@ -104,25 +101,8 @@ class WarrantSpanProcessor(SpanProcessor):
 
 def classify(attrs: Mapping[str, Any]) -> Optional[str]:
     """``"model_call"``, ``"tool_call"`` or ``None`` for spans that are not generative-AI spans."""
-    op = attrs.get("gen_ai.operation.name")
-    if op in _TOOL_OPERATIONS or "gen_ai.tool.name" in attrs:
-        return "tool_call"
-    if op in _MODEL_OPERATIONS or "gen_ai.request.model" in attrs or "gen_ai.response.model" in attrs:
-        return "model_call"
-    return None
+    return classify_attrs(attrs)
 
 
-def _first(attrs: Mapping[str, Any], *keys: str) -> Optional[Any]:
-    for key in keys:
-        value = attrs.get(key)
-        if value is not None and value != "":
-            return value
-    return None
-
-
-def _int(value: Any) -> int:
-    try:
-        n = int(value) if value is not None else 0
-    except (TypeError, ValueError):
-        return 0
-    return n if n >= 0 else 0
+_first = first_attr
+_int = to_int
