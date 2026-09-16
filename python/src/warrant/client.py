@@ -66,6 +66,7 @@ class Verdict:
     policy_version: Optional[str] = None
     clause: Optional[str] = None
     reason: Optional[str] = None
+    flagged: bool = False
 
     def __post_init__(self) -> None:
         if self.result not in MANDATE_RESULTS:
@@ -341,10 +342,12 @@ class Decision:
 
         verdict = self._verdict or Verdict("unchecked")
         mandate: Dict[str, Any] = {"result": verdict.result}
-        for key in ("policy_id", "policy_version", "clause"):
+        for key in ("policy_id", "policy_version", "clause", "reason"):
             value = getattr(verdict, key)
             if value:
                 mandate[key] = value
+        if verdict.flagged:
+            mandate["flagged"] = True
 
         actor: Dict[str, Any] = {"name": client.agent.name, "version": client.agent.version}
         if client.agent.instance:
@@ -390,6 +393,8 @@ class Warrant:
 
     ``store`` is a path to a local SQLite file (default ``$WARRANT_STORE`` or
     ``.warrant/records.db``), or any object with ``write(records)`` for custom sinks.
+    ``policy_bundle`` is a directory of CEL policy files (see ``warrant.policy``);
+    ``policy`` is any object with ``evaluate(decision_class, inputs) -> Verdict``.
     Recording never blocks the caller: records are queued and written by a background
     thread, and spilled to ``spill_dir`` if the store is unavailable.
     """
@@ -403,6 +408,7 @@ class Warrant:
         agent: Optional[AgentInfo] = None,
         on_behalf_of: Optional[str] = None,
         policy: Optional[PolicyEngine] = None,
+        policy_bundle: Union[str, Path, None] = None,
         redact: Optional[Redactor] = None,
         currency: Optional[str] = None,
         spill_dir: Union[str, Path, None] = None,
@@ -419,6 +425,12 @@ class Warrant:
             raise ValueError(f"currency must be a three-letter ISO code, got {self.currency!r}")
         self.agent = agent or _agent_from_env()
         self.on_behalf_of = on_behalf_of
+        if policy is not None and policy_bundle is not None:
+            raise ValueError("pass either policy or policy_bundle, not both")
+        if policy_bundle is not None:
+            from warrant.policy import CelPolicyEngine, PolicyBundle
+
+            policy = CelPolicyEngine(PolicyBundle.load(policy_bundle))
         self.policy = policy
         self.redactor = redact
 

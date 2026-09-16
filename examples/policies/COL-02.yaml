@@ -1,0 +1,36 @@
+policy_id: COL-02
+version: "2026.1"
+title: Collections outreach conduct
+classes: [collections.*]
+fail_mode: escalate
+default: deny
+clauses:
+  - id: "2.1"
+    title: No contact outside 08:00 to 19:00 local time
+    when: hour_local < 8 || hour_local >= 19
+    result: deny
+  - id: "2.2"
+    title: At most three attempts per day
+    when: attempts_today >= 3
+    result: deny
+  - id: "2.3"
+    title: Settlement offers above 20% waiver need an officer
+    when: waiver_pct > 20
+    result: escalate
+  - id: "2.4"
+    title: Within conduct rules
+    when: "true"
+    result: allow
+tests:
+  - name: daytime second attempt allowed
+    inputs: {hour_local: 11, attempts_today: 1, waiver_pct: 0}
+    expect: allow
+    clause: "2.4"
+  - name: late evening denied
+    inputs: {hour_local: 21, attempts_today: 0, waiver_pct: 0}
+    expect: deny
+    clause: "2.1"
+  - name: big waiver escalates
+    inputs: {hour_local: 11, attempts_today: 0, waiver_pct: 35}
+    expect: escalate
+    clause: "2.3"

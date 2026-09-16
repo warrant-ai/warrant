@@ -31,7 +31,7 @@ def test_happy_path_record_has_every_section(client):
         "class": "credit.approve", "action": "approve", "subject": "LN-20431", "status": "acted",
         "summary": "Approve personal loan LN-20431", "alternatives": ["refer", "decline"],
     }
-    assert record["mandate"] == {"result": "unchecked"}
+    assert record["mandate"] == {"result": "unchecked", "reason": "no policy engine configured"}
     names = [e["name"] for e in record["evidence"]]
     assert names == ["bureau_pull", "anthropic/claude-sonnet-5", "kyc_match"]
     assert record["evidence"][0]["content_hash"] == digest

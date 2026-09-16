@@ -23,7 +23,8 @@ classifiers = [
 dependencies = ["jsonschema>=4.18"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "build>=1.2"]
+policy = ["cel-python>=0.5"]
+dev = ["pytest>=8", "build>=1.2", "cel-python>=0.5"]
 
 [project.scripts]
 warrant = "warrant.cli:main"

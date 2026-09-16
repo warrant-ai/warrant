@@ -1,0 +1,35 @@
+policy_id: CR-07
+version: "2026.3"
+title: Retail personal loan auto-approval
+classes: [credit.approve]
+fail_mode: closed
+default: escalate
+clauses:
+  - id: "4.1"
+    title: Decline below bureau floor
+    when: bureau_score < 650
+    result: deny
+  - id: "4.2"
+    title: Auto-approve up to 5,00,000 when bureau score >= 720 and FOIR <= 45%
+    when: amount <= 500000 && bureau_score >= 720 && foir <= 0.45
+    result: allow
+  - id: "4.3"
+    title: Refer tickets above 5,00,000 to a credit officer
+    when: amount > 500000
+    result: escalate
+tests:
+  - name: within limit auto-approves
+    inputs: {amount: 450000, bureau_score: 748, foir: 0.38}
+    expect: allow
+    clause: "4.2"
+  - name: bureau floor declines before anything else
+    inputs: {amount: 100000, bureau_score: 610, foir: 0.20}
+    expect: deny
+    clause: "4.1"
+  - name: large ticket refers
+    inputs: {amount: 900000, bureau_score: 790, foir: 0.30}
+    expect: escalate
+    clause: "4.3"
+  - name: thin score in range but high FOIR falls to default
+    inputs: {amount: 200000, bureau_score: 700, foir: 0.60}
+    expect: escalate

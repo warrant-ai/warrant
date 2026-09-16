@@ -106,6 +106,78 @@ def _cmd_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_kv(pairs: List[str]) -> dict:
+    inputs = {}
+    for pair in pairs:
+        if "=" not in pair:
+            raise ValueError(f"expected key=value, got {pair!r}")
+        key, raw = pair.split("=", 1)
+        try:
+            inputs[key] = json.loads(raw)
+        except json.JSONDecodeError:
+            inputs[key] = raw
+    return inputs
+
+
+def _load_bundle(path: str):
+    from warrant.policy import PolicyBundle, PolicyError
+
+    try:
+        return PolicyBundle.load(path), None
+    except FileNotFoundError as exc:
+        return None, str(exc)
+    except PolicyError as exc:
+        return None, f"policy error: {exc}"
+    except ImportError as exc:
+        return None, str(exc)
+
+
+def _cmd_policy_test(args: argparse.Namespace) -> int:
+    from warrant.policy import run_policy_tests
+
+    bundle, error = _load_bundle(args.bundle)
+    if bundle is None:
+        print(error, file=sys.stderr)
+        return 1
+    results = run_policy_tests(bundle)
+    if not results:
+        print(f"{args.bundle}: {len(bundle.policies)} policy file(s), no tests defined")
+        return 0
+    failed = [r for r in results if not r.passed]
+    for r in results:
+        mark = "ok  " if r.passed else "FAIL"
+        line = f"{mark} {r.policy_id}: {r.name}"
+        print(line if r.passed else f"{line}: {r.detail}", file=sys.stdout if r.passed else sys.stderr)
+    print(f"{len(results) - len(failed)} passed, {len(failed)} failed across {len(bundle.policies)} policy file(s)")
+    return 1 if failed else 0
+
+
+def _cmd_policy_check(args: argparse.Namespace) -> int:
+    from warrant.policy import CelPolicyEngine
+
+    bundle, error = _load_bundle(args.bundle)
+    if bundle is None:
+        print(error, file=sys.stderr)
+        return 1
+    try:
+        inputs = _parse_kv(args.inputs)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    verdict = CelPolicyEngine(bundle).evaluate(args.decision_class, inputs)
+    parts = [verdict.result]
+    if verdict.policy_id:
+        parts.append(f"policy {verdict.policy_id}@{verdict.policy_version}")
+    if verdict.clause:
+        parts.append(f"clause {verdict.clause}")
+    if verdict.reason:
+        parts.append(verdict.reason)
+    if verdict.flagged:
+        parts.append("FLAGGED")
+    print("  ".join(parts))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="warrant", description="Warrant: the decision ledger for AI agents.")
     parser.add_argument("--version", action="version", version=f"warrant {__version__} (schema v{SCHEMA_VERSION})")
@@ -127,6 +199,18 @@ def build_parser() -> argparse.ArgumentParser:
     exp.add_argument("--stream", metavar="NAME", help="only this stream")
     exp.add_argument("-o", "--output", metavar="FILE", help="write here instead of stdout")
     exp.set_defaults(func=_cmd_export)
+
+    pol = sub.add_parser("policy", help="work with a CEL policy bundle")
+    pol_sub = pol.add_subparsers(dest="policy_command")
+    pol.set_defaults(func=lambda _args: (pol.print_help(), 2)[1])
+    pt = pol_sub.add_parser("test", help="run the tests embedded in each policy file")
+    pt.add_argument("bundle", metavar="BUNDLE", help="policy directory or file")
+    pt.set_defaults(func=_cmd_policy_test)
+    pc = pol_sub.add_parser("check", help="evaluate one decision class against key=value inputs")
+    pc.add_argument("bundle", metavar="BUNDLE")
+    pc.add_argument("decision_class", metavar="CLASS")
+    pc.add_argument("inputs", nargs="*", metavar="KEY=VALUE", help="values are parsed as JSON, else strings")
+    pc.set_defaults(func=_cmd_policy_check)
     return parser
 
 

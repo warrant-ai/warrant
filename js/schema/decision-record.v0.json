@@ -158,6 +158,14 @@
             "escalate",
             "unchecked"
           ]
+        },
+        "reason": {
+          "type": "string",
+          "description": "Why the result was reached: the matching clause title, 'no clause matched', or the evaluation error under a fail mode."
+        },
+        "flagged": {
+          "type": "boolean",
+          "description": "True when the result came from a fail mode (fail-open or fail-escalate) rather than a clause, so reviewers can sample it."
         }
       }
     },
