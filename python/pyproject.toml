@@ -9,7 +9,7 @@ description = "Warrant: the decision ledger for AI agents. Record every conseque
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 authors = [{ name = "AI Foundry Ventures" }]
 keywords = ["ai-agents", "audit", "decision-records", "governance", "llm", "observability", "policy"]
 classifiers = [
@@ -24,7 +24,8 @@ dependencies = ["jsonschema>=4.18"]
 
 [project.optional-dependencies]
 policy = ["cel-python>=0.5"]
-dev = ["pytest>=8", "build>=1.2", "cel-python>=0.5"]
+otel = ["opentelemetry-sdk>=1.20"]
+dev = ["pytest>=8", "build>=1.2", "cel-python>=0.5", "opentelemetry-sdk>=1.20"]
 
 [project.scripts]
 warrant = "warrant.cli:main"
