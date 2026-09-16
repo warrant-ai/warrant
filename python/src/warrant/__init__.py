@@ -10,7 +10,7 @@
     w.outcome(subject="LN-20431", label="performing")
 """
 
-from warrant.client import AgentInfo, Decision, PolicyEngine, Verdict, Warrant, current_decision
+from warrant.client import AgentInfo, Decision, PolicyEngine, Unreplayable, Verdict, Warrant, current_decision
 from warrant.redaction import Redactor
 from warrant.schema import SCHEMA_VERSION, ValidationError, load_schema, validate
 from warrant.store import SQLiteStore
@@ -26,6 +26,7 @@ __all__ = [
     "SCHEMA_VERSION",
     "SQLiteStore",
     "StreamReport",
+    "Unreplayable",
     "ValidationError",
     "Verdict",
     "Warrant",

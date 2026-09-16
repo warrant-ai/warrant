@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextvars
+import json
 import logging
 import os
 import re
@@ -11,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Dict, List, Mapping, Optional, Protocol, Sequence, Type, Union
+from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Sequence, Type, Union
 
 from warrant.emit import Emitter, Sink
 from warrant.hashing import content_hash
@@ -30,6 +31,39 @@ MANDATE_RESULTS = ("allow", "deny", "escalate", "unchecked")
 HUMAN_VERDICTS = ("approve", "reject", "amend")
 
 _current: "contextvars.ContextVar[Optional[Decision]]" = contextvars.ContextVar("warrant_decision", default=None)
+
+
+class Unreplayable(Exception):
+    """Frozen replay could not serve a tool call from recorded evidence."""
+
+
+class ReplaySource(Protocol):
+    """Serves recorded tool results during frozen replay."""
+
+    def lookup(self, name: str) -> Any:
+        """Return the next recorded result for tool ``name`` or raise ``Unreplayable``."""
+
+
+def encode_blob(content: Any) -> Dict[str, Any]:
+    """JSON-safe envelope for captured evidence content."""
+    if isinstance(content, (bytes, bytearray, memoryview)):
+        import base64
+
+        return {"encoding": "base64", "data": base64.b64encode(bytes(content)).decode("ascii")}
+    if isinstance(content, str):
+        return {"encoding": "utf8", "data": content}
+    return {"encoding": "json", "data": content}
+
+
+def decode_blob(blob: Dict[str, Any]) -> Any:
+    encoding = blob.get("encoding")
+    if encoding == "base64":
+        import base64
+
+        return base64.b64decode(blob["data"])
+    if encoding in ("utf8", "json"):
+        return blob["data"]
+    raise ValueError(f"unknown blob encoding {encoding!r}")
 
 
 def current_decision() -> Optional["Decision"]:
@@ -104,6 +138,7 @@ class Decision:
         *,
         on_behalf_of: Optional[str],
         alternatives: Optional[Sequence[str]],
+        replay_source: Optional[ReplaySource] = None,
     ) -> None:
         if not _CLASS_RE.match(decision_class):
             raise ValueError(f"decision class must look like 'credit.approve', got {decision_class!r}")
@@ -124,6 +159,9 @@ class Decision:
         self._evidence: List[Dict[str, Any]] = []
         self._cost_items: List[Dict[str, Any]] = []
         self._human: Dict[str, Any] = {"required": False}
+        self._inputs: Optional[Dict[str, Any]] = None
+        self._blobs: Dict[str, Dict[str, Any]] = {}
+        self._replay_source = replay_source
         self._token: Optional[contextvars.Token] = None
         self._closed = False
 
@@ -132,6 +170,8 @@ class Decision:
     def check(self, **inputs: Any) -> Verdict:
         """Ask the policy engine whether this action is within mandate. Synchronous; runs locally."""
         self._assert_open()
+        if self._client.capture_inputs and self._inputs is None:
+            self.set_inputs(inputs)
         engine = self._client.policy
         if engine is None:
             self._verdict = Verdict("unchecked", reason="no policy engine configured")
@@ -139,7 +179,48 @@ class Decision:
             self._verdict = engine.evaluate(self.decision_class, inputs)
         return self._verdict
 
+    def set_inputs(self, inputs: Mapping[str, Any]) -> None:
+        """Record the inputs this decision is made on, so it can be replayed. Must be JSON-serialisable."""
+        self._assert_open()
+        try:
+            self._inputs = json.loads(json.dumps(dict(inputs)))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"inputs must be JSON-serialisable: {exc}") from exc
+
+    @property
+    def inputs(self) -> Optional[Dict[str, Any]]:
+        return self._inputs
+
+    @property
+    def replaying(self) -> bool:
+        return self._replay_source is not None
+
     # -- evidence and cost ---------------------------------------------------
+
+    def tool(
+        self,
+        name: str,
+        fn: Callable[[], Any],
+        *,
+        uri: Optional[str] = None,
+        amount: float = 0.0,
+        provider: Optional[str] = None,
+        excerpt: Optional[str] = None,
+    ) -> Any:
+        """Run a tool through Warrant. Live: calls ``fn``, records the result as evidence and, with
+        ``capture_evidence`` on, keeps the content locally for replay. Frozen replay: returns the
+        recorded result without calling ``fn``, or raises ``Unreplayable``."""
+        self._assert_open()
+        if self._replay_source is not None:
+            result = self._replay_source.lookup(name)
+        else:
+            result = fn()
+        digest = self.evidence(name, uri=uri or f"tool://{name}", type="tool_call", content=result, excerpt=excerpt)
+        if self._client.capture_evidence and self._replay_source is None:
+            self._blobs[digest] = encode_blob(result)
+        if amount:
+            self.cost(amount, kind="tool_call", provider=provider or name)
+        return result
 
     def evidence(
         self,
@@ -306,7 +387,7 @@ class Decision:
         self._closed = True
         record = self._build(exc)
         try:
-            validate(record)
+            validate({k: v for k, v in record.items() if k != "_blobs"})
         except ValidationError as err:
             log.error("warrant decision %s produced an invalid record: %s", self.record_id, "; ".join(err.errors))
             if exc is None:
@@ -339,6 +420,8 @@ class Decision:
             decision["summary"] = summary
         if self._alternatives:
             decision["alternatives"] = self._alternatives
+        if self._inputs is not None:
+            decision["inputs"] = self._inputs
 
         verdict = self._verdict or Verdict("unchecked")
         mandate: Dict[str, Any] = {"result": verdict.result}
@@ -378,7 +461,11 @@ class Decision:
             "cost": cost,
             "outcome": {"status": "pending"},
         }
-        return client.redactor.apply(record) if client.redactor else record
+        if client.redactor:
+            record = client.redactor.apply(record)
+        if self._blobs:
+            record["_blobs"] = self._blobs
+        return record
 
 
 def _hash_content(content: Any) -> str:
@@ -395,6 +482,9 @@ class Warrant:
     ``.warrant/records.db``), or any object with ``write(records)`` for custom sinks.
     ``policy_bundle`` is a directory of CEL policy files (see ``warrant.policy``);
     ``policy`` is any object with ``evaluate(decision_class, inputs) -> Verdict``.
+    ``capture_inputs`` stores ``check()`` inputs on the record and ``capture_evidence``
+    keeps tool results from ``d.tool()`` in the local store, both for replay; turn them
+    on in development and staging, not where payloads must stay out of the store.
     Recording never blocks the caller: records are queued and written by a background
     thread, and spilled to ``spill_dir`` if the store is unavailable.
     """
@@ -411,6 +501,8 @@ class Warrant:
         policy_bundle: Union[str, Path, None] = None,
         redact: Optional[Redactor] = None,
         currency: Optional[str] = None,
+        capture_inputs: bool = False,
+        capture_evidence: bool = False,
         spill_dir: Union[str, Path, None] = None,
         max_queue: int = 10_000,
         batch_size: int = 200,
@@ -433,6 +525,8 @@ class Warrant:
             policy = CelPolicyEngine(PolicyBundle.load(policy_bundle))
         self.policy = policy
         self.redactor = redact
+        self.capture_inputs = capture_inputs
+        self.capture_evidence = capture_evidence
 
         if store is None or isinstance(store, (str, Path)):
             path = Path(store or os.environ.get("WARRANT_STORE") or ".warrant/records.db")

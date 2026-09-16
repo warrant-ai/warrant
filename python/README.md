@@ -76,6 +76,27 @@ warrant policy check ./policies credit.approve amount=450000 bureau_score=748 fo
 
 Without the extra, `Warrant(policy=...)` accepts any object with `evaluate(decision_class, inputs) -> Verdict`.
 
+## Automatic evidence from OpenTelemetry
+
+If your model and tool calls are already instrumented with the OpenTelemetry generative-AI conventions, register the span processor once and every such span that starts inside a `decide()` scope is attached to that decision as evidence, with token usage, when it ends:
+
+```
+pip install "warrantai[otel]"
+```
+
+```python
+from opentelemetry.sdk.trace import TracerProvider
+from warrant.otel import WarrantSpanProcessor
+
+def price(provider, model, tokens_in, tokens_out):
+    return tokens_in * 0.0003 + tokens_out * 0.0015     # your price table, in the client's currency
+
+provider = TracerProvider()
+provider.add_span_processor(WarrantSpanProcessor(pricer=price))
+```
+
+Model spans become `model_call` evidence and tool spans become `tool_call` evidence, each pointing at the span by trace and span id. The conventions carry tokens but not money, so cost is whatever `pricer` returns, or zero. Spans that start outside a decision, or end after it closed, are ignored. For code without OpenTelemetry, `d.model_call(...)` and `d.tool_call(...)` record the same thing by hand.
+
 ```
 warrant export --store .warrant/records.db -o export.jsonl
 warrant verify export.jsonl          # lending: 1,204 record(s), chain OK
@@ -83,12 +104,45 @@ warrant validate examples/loan-approval.json
 warrant schema
 ```
 
+## Replay: test a change against real decisions
+
+Turn on capture where it is safe to do so (development and staging), and route tool calls through `d.tool()` so their results can be served back during replay:
+
+```python
+w = Warrant(stream="lending", policy_bundle="./policies", capture_inputs=True, capture_evidence=True, ...)
+
+def decide(d, inputs, target=None):
+    verdict = d.check(**inputs)
+    bureau = d.tool("bureau_pull", lambda: cibil.pull(inputs["subject"]), uri=f"cibil://req/{inputs['subject']}")
+    d.model_call("anthropic", target.model if target else "claude-sonnet-5", tokens_in=..., tokens_out=..., amount=...)
+    d.act("approve" if verdict.allowed and bureau["score"] >= 720 else "refer")
+```
+
+`capture_inputs` stores the `check()` inputs on the record; `capture_evidence` keeps tool results in the local store's blob table, keyed by the same content hash the record carries. The sealed record itself still holds evidence by hash and reference only.
+
+Then, before shipping a change:
+
+```
+warrant set create lending-edge --store .warrant/records.db --from-stream lending --where "outcome.label == 'default'" --limit 200
+warrant target add underwriter-v2.4 --agent credit-underwriter@2.4.0 --model anthropic/claude-haiku-4-5-20251001 --policy ./policies --decider underwriter:decide
+warrant test lending-edge --against underwriter-v2.4 --mode frozen --fail-on flipped,new-deny --max-cost-increase 10% --junit report.xml
+```
+
+```
+# 200 decisions replayed (frozen) against underwriter-v2.4
+# 7 flipped (5 approve -> refer, 2 refer -> approve)
+#   by recorded outcome: 5 default, 2 performing
+# 1 new deny (CR-07 clause 4.1)
+# cost 3.84 -> 0.90 per decision (-77%)
+# FAILED: 7 flipped decision(s) exceed threshold 0
+```
+
+The decider receives the recorded `check()` inputs, or the full payload if live code called `d.set_inputs(payload)`; the subject is `d.subject`. A set is a portable JSONL file of real decisions with their outcomes joined. A target names what changes: agent version, model, policy bundle, and the decider, a `module:function` that makes one decision with the same `d` API as live code. In `frozen` mode `d.tool()` returns the recorded result and only model calls run; in `live` mode tools run again. A decision whose new code calls a tool the recording never saw is reported as unreplayable rather than silently run live. Replayed records never enter the ledger. Gates: `--fail-on flipped,new-deny,new-escalate,unreplayable` and `--max-cost-increase PCT`; a decider that raises always fails the run. Reports as JSON and JUnit for CI.
+
 ## What arrives next
 
 - budget envelopes: cost ceilings per decision, workflow and day, enforced through `check()`
 - signed policy bundles published by a policy service and cached by the SDK
-- automatic evidence capture from OpenTelemetry generative-AI spans inside a decision scope (`warrant.current_decision()` is the hook)
-- `warrant test`: replay a set of real decisions against a changed target and fail the build on flipped decisions
 - `warrant import`: reconstruct decision records from existing trace exports and run policy over them retrospectively
 - collector and self-hosted PostgreSQL store
 

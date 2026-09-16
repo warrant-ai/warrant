@@ -37,6 +37,10 @@ CREATE TABLE IF NOT EXISTS records (
 );
 CREATE INDEX IF NOT EXISTS records_subject ON records (stream, subject, record_type);
 CREATE INDEX IF NOT EXISTS records_decision ON records (decision_record_id);
+CREATE TABLE IF NOT EXISTS evidence_blobs (
+    hash TEXT PRIMARY KEY,
+    blob TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS stream_heads (
     stream TEXT PRIMARY KEY,
     stream_seq INTEGER NOT NULL,
@@ -92,6 +96,11 @@ class SQLiteStore:
             raise PermanentSinkError("record has no record_id")
         if "seal" in record:
             raise PermanentSinkError(f"record {record_id} is already sealed; the store seals records itself")
+        blobs = record.get("_blobs") or {}
+        if blobs:
+            record = {k: v for k, v in record.items() if k != "_blobs"}
+            for digest, blob in blobs.items():
+                self._conn.execute("INSERT OR IGNORE INTO evidence_blobs (hash, blob) VALUES (?, ?)", (digest, canonical_json(blob)))
         if self._conn.execute("SELECT 1 FROM records WHERE record_id = ?", (record_id,)).fetchone():
             log.info("warrant store skipping duplicate record %s", record_id)
             return
@@ -165,6 +174,25 @@ class SQLiteStore:
                 (stream, subject),
             ).fetchone()
         return row["record_id"] if row else None
+
+    def get_blob(self, content_hash: str) -> Optional[Dict[str, Any]]:
+        """Captured evidence content for a hash, as the envelope written by ``encode_blob``."""
+        import json
+
+        with self._lock:
+            row = self._conn.execute("SELECT blob FROM evidence_blobs WHERE hash = ?", (content_hash,)).fetchone()
+        return json.loads(row["blob"]) if row else None
+
+    def latest_outcome(self, decision_record_id: str) -> Optional[Dict[str, Any]]:
+        """The most recent outcome record linked to a decision, if any."""
+        import json
+
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT body FROM records WHERE decision_record_id = ? AND record_type = 'outcome' ORDER BY stream_seq DESC LIMIT 1",
+                (decision_record_id,),
+            ).fetchone()
+        return json.loads(row["body"]) if row else None
 
     def streams(self) -> List[str]:
         with self._lock:

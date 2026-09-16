@@ -131,6 +131,10 @@
             "failed"
           ],
           "description": "acted: the action was performed. withheld: the decision scope closed without acting (for example a deny routed to a human). failed: an exception left the scope before the action."
+        },
+        "inputs": {
+          "type": "object",
+          "description": "The inputs the decision was made on, captured only when the SDK is configured with capture_inputs (development and staging). Needed for replay."
         }
       }
     },
