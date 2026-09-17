@@ -23,6 +23,7 @@ log = logging.getLogger("warrant.store")
 _DDL = """
 CREATE TABLE IF NOT EXISTS records (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant TEXT NOT NULL DEFAULT 'local',
     stream TEXT NOT NULL,
     stream_seq INTEGER NOT NULL,
     record_id TEXT NOT NULL UNIQUE,
@@ -33,24 +34,36 @@ CREATE TABLE IF NOT EXISTS records (
     prev_hash TEXT,
     hash TEXT NOT NULL UNIQUE,
     body TEXT NOT NULL,
-    UNIQUE (stream, stream_seq)
+    UNIQUE (tenant, stream, stream_seq)
 );
-CREATE INDEX IF NOT EXISTS records_subject ON records (stream, subject, record_type);
+CREATE INDEX IF NOT EXISTS records_subject ON records (tenant, stream, subject, record_type);
 CREATE INDEX IF NOT EXISTS records_decision ON records (decision_record_id);
 CREATE TABLE IF NOT EXISTS evidence_blobs (
     hash TEXT PRIMARY KEY,
     blob TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS stream_heads (
-    stream TEXT PRIMARY KEY,
+    tenant TEXT NOT NULL,
+    stream TEXT NOT NULL,
     stream_seq INTEGER NOT NULL,
-    hash TEXT NOT NULL
+    hash TEXT NOT NULL,
+    PRIMARY KEY (tenant, stream)
 );
 CREATE TRIGGER IF NOT EXISTS records_no_update BEFORE UPDATE ON records
 BEGIN SELECT RAISE(ABORT, 'warrant records are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS records_no_delete BEFORE DELETE ON records
 BEGIN SELECT RAISE(ABORT, 'warrant records are append-only'); END;
 """
+
+
+def open_store(url: Union[str, Path], *, read_only: bool = False):
+    """``postgres://...`` or ``postgresql://...`` opens a PostgreSQL store; anything else is a SQLite path."""
+    text = str(url)
+    if text.startswith(("postgres://", "postgresql://")):
+        from warrant.pg import PostgresStore
+
+        return PostgresStore(text, read_only=read_only)
+    return SQLiteStore(url, read_only=read_only)
 
 
 class SQLiteStore:
@@ -69,9 +82,32 @@ class SQLiteStore:
             self._conn = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=NORMAL")
+            self._migrate_v01()
             self._conn.executescript(_DDL)
         self._conn.row_factory = sqlite3.Row
         log.info("warrant store opened at %s%s", self.path, " (read-only)" if read_only else "")
+
+    def _migrate_v01(self) -> None:
+        """0.1.0 stores chained per stream only; rebuild heads per (tenant, stream)."""
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(records)")}
+        if not cols or "tenant" in cols:
+            return
+        log.info("warrant store: migrating %s to per-tenant chains", self.path)
+        self._conn.executescript(
+            """
+            BEGIN;
+            DROP TRIGGER IF EXISTS records_no_update;
+            ALTER TABLE records ADD COLUMN tenant TEXT NOT NULL DEFAULT 'local';
+            UPDATE records SET tenant = COALESCE(json_extract(body, '$.tenant'), 'local');
+            DROP TABLE IF EXISTS stream_heads;
+            CREATE TABLE stream_heads (tenant TEXT NOT NULL, stream TEXT NOT NULL, stream_seq INTEGER NOT NULL, hash TEXT NOT NULL, PRIMARY KEY (tenant, stream));
+            INSERT INTO stream_heads (tenant, stream, stream_seq, hash)
+                SELECT r.tenant, r.stream, r.stream_seq, r.hash FROM records r
+                JOIN (SELECT tenant, stream, MAX(stream_seq) AS m FROM records GROUP BY tenant, stream) x
+                  ON x.tenant = r.tenant AND x.stream = r.stream AND x.m = r.stream_seq;
+            COMMIT;
+            """
+        )
 
     # -- Sink ----------------------------------------------------------------
 
@@ -107,7 +143,10 @@ class SQLiteStore:
         stream = record.get("stream")
         if not isinstance(stream, str) or not stream:
             raise PermanentSinkError(f"record {record_id} has no stream")
-        head = self._conn.execute("SELECT stream_seq, hash FROM stream_heads WHERE stream = ?", (stream,)).fetchone()
+        tenant = record.get("tenant")
+        if not isinstance(tenant, str) or not tenant:
+            raise PermanentSinkError(f"record {record_id} has no tenant")
+        head = self._conn.execute("SELECT stream_seq, hash FROM stream_heads WHERE tenant = ? AND stream = ?", (tenant, stream)).fetchone()
         stream_seq = (head["stream_seq"] + 1) if head else 1
         prev_hash = head["hash"] if head else None
 
@@ -120,9 +159,10 @@ class SQLiteStore:
             raise PermanentSinkError(f"record {record_id} failed schema validation: {exc.errors[0]}") from exc
 
         self._conn.execute(
-            "INSERT INTO records (stream, stream_seq, record_id, record_type, subject, decision_record_id,"
-            " timestamp, prev_hash, hash, body) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO records (tenant, stream, stream_seq, record_id, record_type, subject, decision_record_id,"
+            " timestamp, prev_hash, hash, body) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (
+                tenant,
                 stream,
                 stream_seq,
                 record_id,
@@ -136,23 +176,28 @@ class SQLiteStore:
             ),
         )
         self._conn.execute(
-            "INSERT INTO stream_heads (stream, stream_seq, hash) VALUES (?,?,?)"
-            " ON CONFLICT(stream) DO UPDATE SET stream_seq = excluded.stream_seq, hash = excluded.hash",
-            (stream, stream_seq, sealed["seal"]["hash"]),
+            "INSERT INTO stream_heads (tenant, stream, stream_seq, hash) VALUES (?,?,?,?)"
+            " ON CONFLICT(tenant, stream) DO UPDATE SET stream_seq = excluded.stream_seq, hash = excluded.hash",
+            (tenant, stream, stream_seq, sealed["seal"]["hash"]),
         )
 
     # -- queries -------------------------------------------------------------
 
-    def iter_records(self, stream: Optional[str] = None) -> Iterator[Dict[str, Any]]:
-        """Yield sealed records in chain order, optionally for one stream."""
+    def iter_records(self, stream: Optional[str] = None, tenant: Optional[str] = None) -> Iterator[Dict[str, Any]]:
+        """Yield sealed records in chain order, optionally for one stream and/or tenant."""
         sql = "SELECT body FROM records"
-        params: tuple = ()
+        clauses, params = [], []
         if stream is not None:
-            sql += " WHERE stream = ?"
-            params = (stream,)
-        sql += " ORDER BY stream, stream_seq"
+            clauses.append("stream = ?")
+            params.append(stream)
+        if tenant is not None:
+            clauses.append("tenant = ?")
+            params.append(tenant)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY tenant, stream, stream_seq"
         with self._lock:
-            rows = self._conn.execute(sql, params).fetchall()
+            rows = self._conn.execute(sql, tuple(params)).fetchall()
         import json
 
         for row in rows:
@@ -165,14 +210,16 @@ class SQLiteStore:
             row = self._conn.execute("SELECT body FROM records WHERE record_id = ?", (record_id,)).fetchone()
         return json.loads(row["body"]) if row else None
 
-    def find_decision(self, stream: str, subject: str) -> Optional[str]:
-        """record_id of the most recent decision record for ``subject`` in ``stream``."""
+    def find_decision(self, stream: str, subject: str, tenant: Optional[str] = None) -> Optional[str]:
+        """record_id of the most recent decision record for ``subject`` in ``stream`` (any tenant unless given)."""
+        sql = "SELECT record_id FROM records WHERE stream = ? AND subject = ? AND record_type = 'decision'"
+        params: list = [stream, subject]
+        if tenant is not None:
+            sql += " AND tenant = ?"
+            params.append(tenant)
+        sql += " ORDER BY seq DESC LIMIT 1"
         with self._lock:
-            row = self._conn.execute(
-                "SELECT record_id FROM records WHERE stream = ? AND subject = ? AND record_type = 'decision'"
-                " ORDER BY stream_seq DESC LIMIT 1",
-                (stream, subject),
-            ).fetchone()
+            row = self._conn.execute(sql, tuple(params)).fetchone()
         return row["record_id"] if row else None
 
     def get_blob(self, content_hash: str) -> Optional[Dict[str, Any]]:
@@ -189,14 +236,14 @@ class SQLiteStore:
 
         with self._lock:
             row = self._conn.execute(
-                "SELECT body FROM records WHERE decision_record_id = ? AND record_type = 'outcome' ORDER BY stream_seq DESC LIMIT 1",
+                "SELECT body FROM records WHERE decision_record_id = ? AND record_type = 'outcome' ORDER BY seq DESC LIMIT 1",
                 (decision_record_id,),
             ).fetchone()
         return json.loads(row["body"]) if row else None
 
     def streams(self) -> List[str]:
         with self._lock:
-            return [r["stream"] for r in self._conn.execute("SELECT stream FROM stream_heads ORDER BY stream")]
+            return [r["stream"] for r in self._conn.execute("SELECT DISTINCT stream FROM stream_heads ORDER BY stream")]
 
     def count(self, stream: Optional[str] = None) -> int:
         with self._lock:

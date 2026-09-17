@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.0 (unreleased)
+
+- Collector: a stateless HTTP service that seals record batches into a store, with per-tenant bearer tokens, health, readiness and Prometheus metrics (`warrant collector`; extra `warrantai[collector]`)
+- PostgreSQL store for self-hosted deployments, chaining per tenant and stream under a row lock so many collectors can write concurrently
+- SDK records to a collector URL with `Warrant(store="https://...", token=...)`; batches are gzip-compressed and spill to disk while the collector is unreachable
+- Chains are now per tenant and stream; local SQLite stores from 0.1.0 migrate on first open; the verifier reports chains as `tenant/stream`
+- `deploy/` with a Dockerfile and a docker-compose file
+- Requires Python 3.10 or newer
+
 ## 0.1.0 (2026-09-17)
 
 The v0.1 preview: everything a developer needs to record decisions locally, check them against policy, replay them against a change, and start from traces they already have.

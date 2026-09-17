@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
+import os
 import sys
 from typing import List, Optional
 
@@ -82,10 +84,9 @@ def _cmd_verify(args: argparse.Namespace) -> int:
 
 
 def _cmd_export(args: argparse.Namespace) -> int:
-    try:
-        store = SQLiteStore(args.store, read_only=True)
-    except FileNotFoundError as exc:
-        print(str(exc), file=sys.stderr)
+    store, error = _open_store(args.store)
+    if store is None:
+        print(error, file=sys.stderr)
         return 1
     try:
         out = open(args.output, "w", encoding="utf-8") if args.output else sys.stdout
@@ -185,10 +186,16 @@ def _workspace(args: argparse.Namespace):
 
 
 def _open_store(path: str):
+    from warrant.store import open_store
+
     try:
-        return SQLiteStore(path, read_only=True), None
+        return open_store(path, read_only=True), None
     except FileNotFoundError as exc:
         return None, str(exc)
+    except ImportError as exc:
+        return None, str(exc)
+    except Exception as exc:  # a bad DSN or an unreachable database
+        return None, f"cannot open store {path!r}: {exc}"
 
 
 def _cmd_set_create(args: argparse.Namespace) -> int:
@@ -356,6 +363,29 @@ def _cmd_import(args: argparse.Namespace) -> int:
     return 0 if report.records else 1
 
 
+def _cmd_collector(args: argparse.Namespace) -> int:
+    try:
+        from warrant.collector import parse_tokens, serve
+    except ImportError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    try:
+        tokens = parse_tokens(",".join(args.token or []) or os.environ.get("WARRANT_COLLECTOR_TOKENS"))
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    if not tokens and not args.insecure:
+        print("no tokens: pass --token tenant:token (or WARRANT_COLLECTOR_TOKENS), or --insecure for local development", file=sys.stderr)
+        return 2
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    try:
+        serve(args.store, listen=args.listen, tokens=tokens, insecure=args.insecure)
+    except Exception as exc:
+        print(f"collector failed: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="warrant", description="Warrant: the decision ledger for AI agents.")
     parser.add_argument("--version", action="version", version=f"warrant {__version__} (schema v{SCHEMA_VERSION})")
@@ -374,7 +404,7 @@ def build_parser() -> argparse.ArgumentParser:
     ver.set_defaults(func=_cmd_verify)
 
     exp = sub.add_parser("export", help="export sealed records from a local store as JSONL")
-    exp.add_argument("--store", required=True, metavar="PATH", help="path to the SQLite store")
+    exp.add_argument("--store", required=True, metavar="URL", help="SQLite path or postgresql:// DSN")
     exp.add_argument("--stream", metavar="NAME", help="only this stream")
     exp.add_argument("-o", "--output", metavar="FILE", help="write here instead of stdout")
     exp.set_defaults(func=_cmd_export)
@@ -396,7 +426,7 @@ def build_parser() -> argparse.ArgumentParser:
     st.set_defaults(func=lambda _args: (st.print_help(), 2)[1])
     sc = st_sub.add_parser("create", help="select decisions from a store into a named set")
     sc.add_argument("name")
-    sc.add_argument("--store", required=True, metavar="PATH")
+    sc.add_argument("--store", required=True, metavar="URL", help="SQLite path or postgresql:// DSN")
     sc.add_argument("--from-stream", dest="stream", required=True, metavar="STREAM")
     sc.add_argument("--where", metavar="CEL", help="filter, e.g. \"outcome.label == 'default'\"")
     sc.add_argument("--limit", type=int)
@@ -440,6 +470,13 @@ def build_parser() -> argparse.ArgumentParser:
     im.add_argument("--dry-run", action="store_true", help="report only, write nothing")
     im.add_argument("--report", metavar="FILE", help="write a JSON report")
     im.set_defaults(func=_cmd_import)
+
+    co = sub.add_parser("collector", help="run the collector: receives record batches over HTTP and seals them into a store")
+    co.add_argument("--store", default=os.environ.get("WARRANT_STORE", ".warrant/records.db"), metavar="URL", help="postgresql://... or a SQLite path")
+    co.add_argument("--listen", default="127.0.0.1:8787", metavar="HOST:PORT")
+    co.add_argument("--token", action="append", metavar="TENANT:TOKEN", help="bearer token per tenant (repeatable); or WARRANT_COLLECTOR_TOKENS")
+    co.add_argument("--insecure", action="store_true", help="no authentication; local development only")
+    co.set_defaults(func=_cmd_collector)
     return parser
 
 

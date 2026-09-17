@@ -479,7 +479,9 @@ class Warrant:
     """Entry point. One instance per stream; share it across decisions and threads.
 
     ``store`` is a path to a local SQLite file (default ``$WARRANT_STORE`` or
-    ``.warrant/records.db``), or any object with ``write(records)`` for custom sinks.
+    ``.warrant/records.db``), a ``postgresql://`` DSN, a collector URL
+    (``https://...``, authenticated with ``token`` or ``$WARRANT_TOKEN``), or any
+    object with ``write(records)`` for custom sinks.
     ``policy_bundle`` is a directory of CEL policy files (see ``warrant.policy``);
     ``policy`` is any object with ``evaluate(decision_class, inputs) -> Verdict``.
     ``capture_inputs`` stores ``check()`` inputs on the record and ``capture_evidence``
@@ -495,6 +497,7 @@ class Warrant:
         *,
         tenant: Optional[str] = None,
         store: Union[str, Path, Sink, None] = None,
+        token: Optional[str] = None,
         agent: Optional[AgentInfo] = None,
         on_behalf_of: Optional[str] = None,
         policy: Optional[PolicyEngine] = None,
@@ -529,10 +532,24 @@ class Warrant:
         self.capture_evidence = capture_evidence
 
         if store is None or isinstance(store, (str, Path)):
-            path = Path(store or os.environ.get("WARRANT_STORE") or ".warrant/records.db")
-            self._store: Optional[SQLiteStore] = SQLiteStore(path)
-            sink: Sink = self._store
-            default_spill = path.parent / "spill"
+            target = str(store or os.environ.get("WARRANT_STORE") or ".warrant/records.db")
+            if target.startswith(("http://", "https://")):
+                from warrant.sinks import HttpSink
+
+                self._store = None
+                sink = HttpSink(target, token)
+                default_spill = Path(".warrant/spill")
+            elif target.startswith(("postgres://", "postgresql://")):
+                from warrant.store import open_store
+
+                self._store = open_store(target)
+                sink = self._store
+                default_spill = Path(".warrant/spill")
+            else:
+                path = Path(target)
+                self._store = SQLiteStore(path)
+                sink = self._store
+                default_spill = path.parent / "spill"
         else:
             self._store = store if isinstance(store, SQLiteStore) else None
             sink = store
@@ -609,9 +626,9 @@ class Warrant:
         if not subject:
             raise ValueError("pass subject or decision_record_id")
         if self._store is None:
-            raise LookupError("subject lookup needs a local store; pass decision_record_id instead")
+            raise LookupError("subject lookup needs a store; when recording to a collector pass decision_record_id instead")
         self._emitter.flush()
-        found = self._store.find_decision(self.stream, subject)
+        found = self._store.find_decision(self.stream, subject, self.tenant)
         if found is None:
             raise LookupError(f"no decision for subject {subject!r} in stream {self.stream!r}")
         return found
@@ -640,7 +657,8 @@ class Warrant:
     # -- lifecycle -----------------------------------------------------------
 
     @property
-    def store(self) -> Optional[SQLiteStore]:
+    def store(self):
+        """The local or PostgreSQL store, or None when recording to a collector."""
         return self._store
 
     def flush(self, timeout: Optional[float] = 5.0) -> bool:

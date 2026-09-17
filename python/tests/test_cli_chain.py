@@ -20,7 +20,7 @@ def test_export_then_verify_roundtrip(tmp_path, capsys):
     assert main(["export", "--store", str(db), "-o", str(out)]) == 0
     assert "exported 4 record(s)" in capsys.readouterr().out
     assert main(["verify", str(out)]) == 0
-    assert "lending: 4 record(s), chain OK" in capsys.readouterr().out
+    assert "local/lending: 4 record(s), chain OK" in capsys.readouterr().out
 
 
 def test_export_to_stdout_filtered_by_stream(tmp_path, capsys):

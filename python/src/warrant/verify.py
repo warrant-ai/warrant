@@ -23,16 +23,18 @@ class StreamReport:
 
 
 def verify_records(records: Iterable[Dict[str, Any]]) -> List[StreamReport]:
-    """Check every stream's sequence, hash chain, schema conformance and id uniqueness.
+    """Check every chain's sequence, hashes, schema conformance and id uniqueness.
 
-    Records may arrive in any order; each stream is sorted by ``sequence`` first.
+    Chains are per tenant and stream, reported as ``tenant/stream``. Records may
+    arrive in any order; each chain is sorted by ``sequence`` first.
     """
     by_stream: Dict[str, List[Dict[str, Any]]] = {}
     unstreamed: List[str] = []
     for record in records:
         stream = record.get("stream")
-        if isinstance(stream, str) and stream:
-            by_stream.setdefault(stream, []).append(record)
+        tenant = record.get("tenant")
+        if isinstance(stream, str) and stream and isinstance(tenant, str) and tenant:
+            by_stream.setdefault(f"{tenant}/{stream}", []).append(record)
         else:
             unstreamed.append(str(record.get("record_id", "?")))
 

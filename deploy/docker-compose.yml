@@ -1,0 +1,30 @@
+# Self-hosted Warrant: PostgreSQL plus one collector.
+#   WARRANT_COLLECTOR_TOKENS="demo-bank:<at least 16 chars>" docker compose -f deploy/docker-compose.yml up
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: warrant
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-warrant}
+      POSTGRES_DB: warrant
+    volumes:
+      - warrant-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U warrant"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  collector:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      WARRANT_STORE: postgresql://warrant:${POSTGRES_PASSWORD:-warrant}@postgres:5432/warrant
+      WARRANT_COLLECTOR_TOKENS: ${WARRANT_COLLECTOR_TOKENS:?set WARRANT_COLLECTOR_TOKENS=tenant:token}
+    ports:
+      - "8787:8787"
+volumes:
+  warrant-pg:

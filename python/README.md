@@ -173,11 +173,29 @@ wrote 6 record(s) to stream 'lending-import' with origin: imported
 
 Accepted inputs are OTLP JSON or JSONL as written by the collector's file exporter, and the Python SDK's console-exporter JSON. Every matched span becomes one record with `origin: imported`; the other generative-AI spans in its trace become evidence by reference, with token usage and, if the taxonomy has a price table, cost. Record ids are derived from the trace and span ids, so importing the same export twice writes nothing new. Imported records are chained like any other, and `origin` keeps them distinguishable from records sealed at decision time. `--dry-run` reports without writing; `--report FILE` writes JSON.
 
+## Production: the collector and PostgreSQL
+
+For a shared, self-hosted store, run the collector in front of PostgreSQL and point agents at it. The collector is stateless; run as many as you like behind a load balancer. Chaining is serialised per tenant and stream inside PostgreSQL.
+
+```
+pip install "warrantai[collector]"
+warrant collector --store postgresql://warrant:...@db:5432/warrant --listen 0.0.0.0:8787 --token demo-bank:<at least 16 chars>
+```
+
+```python
+w = Warrant(stream="lending", tenant="demo-bank", store="https://collector.example.internal", token=os.environ["WARRANT_TOKEN"], ...)
+```
+
+Records are batched, gzip-compressed and sent asynchronously; if the collector is down they spill to disk and are retried. A bearer token belongs to one tenant, and a batch may only carry that tenant's records. `warrant export`, `warrant set create` and `warrant import` accept a `postgresql://` URL wherever they accept a store path. `deploy/docker-compose.yml` starts PostgreSQL and one collector; `deploy/Dockerfile` builds the collector image.
+
+Endpoints: `POST /v1/records`, `GET /healthz`, `GET /readyz` (checks the database), `GET /metrics` (Prometheus text). Limits: 1000 records or 8 MiB per batch.
+
+Stores written by 0.1.0 chained per stream; 0.2.0 chains per tenant and stream and migrates a local store on first open.
+
 ## What arrives next
 
 - budget envelopes: cost ceilings per decision, workflow and day, enforced through `check()`
 - signed policy bundles published by a policy service and cached by the SDK
-- collector and self-hosted PostgreSQL store
 
 Roadmap and schema specification: https://warrantai.dev
 

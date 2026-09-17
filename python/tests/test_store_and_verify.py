@@ -71,7 +71,7 @@ def test_verifier_passes_clean_chain_and_detects_tampering(tmp_path):
     store.close()
 
     reports = verify_records(records)
-    assert [(r.stream, r.records, r.ok) for r in reports] == [("other", 1, True), ("s", 5, True)]
+    assert [(r.stream, r.records, r.ok) for r in reports] == [("t/other", 1, True), ("t/s", 5, True)]
 
     tampered = json.loads(json.dumps(records))
     tampered[3]["decision"]["action"] = "undo"  # records are ordered by stream, so index 3 is s #3
@@ -92,5 +92,7 @@ def test_verifier_passes_clean_chain_and_detects_tampering(tmp_path):
 def test_verifier_flags_records_without_stream_or_sequence():
     (report,) = verify_records([{"record_id": "x"}])
     assert report.stream == "(no stream)" and not report.ok
-    (report,) = verify_records([{"record_id": "x", "stream": "s"}])
+    (report,) = verify_records([{"record_id": "x", "stream": "s", "tenant": "t"}])
     assert "sequence" in report.errors[0]
+    (report,) = verify_records([{"record_id": "x", "stream": "s"}])
+    assert report.stream == "(no stream)"  # no tenant, no chain
