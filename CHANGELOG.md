@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Framework adapters (`warrant.adapters`): name the tools that are decisions with `ToolDecision`, and the adapter gates them on the policy, records acted, withheld and failed decisions, and attaches the session's other tool results as evidence. Claude Agent SDK hooks (`warrantai[claude-agent]`) and a LangGraph `ToolNode` guard with `interrupt()` for escalations (`warrantai[langgraph]`)
 - GitHub Action (`action/`): replay a decision set against a target in CI, fail the check on the gates, and write a job summary that names each changed decision with its recorded outcome
 - MCP server (`warrant mcp`, extra `warrantai[mcp]`): `describe_mandate`, `check_mandate`, `record_decision` and `record_outcome` over stdio for MCP-capable agents. The agent's identity comes from the server's configuration and the mandate is always evaluated by the server, never supplied by the agent
 

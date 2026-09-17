@@ -194,6 +194,45 @@ Endpoints: `POST /v1/records`, `GET /healthz`, `GET /readyz` (checks the databas
 
 Stores written by 0.1.0 chained per stream; 0.2.0 chains per tenant and stream and migrates a local store on first open.
 
+## Adapters: Claude Agent SDK and LangGraph
+
+If your agent is built on a framework, you do not have to wrap each decision by hand. Most tool calls are not decisions, so you name the tools that are, and how to read a decision out of each call:
+
+```python
+from warrant.adapters import ToolDecision
+
+decisions = {"approve_loan": ToolDecision("credit.approve", subject="loan_id", action="approve",
+                                          inputs=["amount", "bureau_score", "foir"])}
+```
+
+Before a mapped tool runs, its arguments are checked against the policy. `deny` stops the call and tells the model which policy and clause said no. `escalate` stops it too, or hands it to a human, as below. `allow` changes nothing: an adapter only ever restricts, it never approves something the framework would have asked about. After the tool runs the decision is recorded, and the other tool results seen in the same session since the last decision are attached as evidence, by hash. A tool that fails is recorded as a failed decision, without its error text. A call the adapter cannot read (no subject, say) is blocked and is not a decision.
+
+**Claude Agent SDK** (`pip install "warrantai[claude-agent,policy]"`):
+
+```python
+from claude_agent_sdk import ClaudeAgentOptions, query
+from warrant.adapters.claude_agent import WarrantHooks
+
+guard = WarrantHooks(w, {"mcp__bank__approve_loan": decisions["approve_loan"]}, pricer=my_price_table)
+options = ClaudeAgentOptions(hooks=guard.hooks(), ...)      # guard.hooks(existing) keeps hooks you already have
+async for message in query(prompt=..., options=options):
+    guard.observe(message)                                  # optional: puts model usage and cost on the next decision
+```
+
+`on_escalate="deny"` (the default, for unattended agents) blocks an escalation; `on_escalate="ask"` hands it to the host's own permission prompt, and the record says whether a person approved it. By default only `mcp__*` tools count as evidence, so file reads and shell commands do not flood a record.
+
+**LangGraph** (`pip install "warrantai[langgraph,policy]"`):
+
+```python
+from langgraph.prebuilt import ToolNode
+from warrant.adapters.langgraph import WarrantToolGuard
+
+guard = WarrantToolGuard(w, decisions, on_escalate="interrupt")
+tools = ToolNode([approve_loan, bureau_pull], wrap_tool_call=guard.wrap, awrap_tool_call=guard.awrap)
+```
+
+With `on_escalate="interrupt"` an escalation pauses the graph with LangGraph's `interrupt()`. Nothing runs and nothing is recorded while it waits. Resume with `Command(resume={"approve": True, "reviewer": "asha@bank.example"})`: the tool runs, and the reviewer's verdict is appended as its own sealed record. The default, `"block"`, returns an error message to the model and records the decision as withheld. Evidence is collected per `thread_id`, and only when there is one, so one customer's lookups can never land on another's decision.
+
 ## MCP: for agents you do not write the code for
 
 Agents built in a host that speaks the Model Context Protocol can use Warrant without the SDK. The server runs over stdio, so the host launches it:
