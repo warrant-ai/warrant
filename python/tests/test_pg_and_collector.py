@@ -122,11 +122,11 @@ class TestPostgres:
         pg.write([_unsealed(1), _unsealed(2)])
         pg.write([_unsealed(2), _unsealed(3, tenant="other")])
         recs = list(pg.iter_records())
-        assert [(r["tenant"], r["sequence"]) for r in recs] == [("other", 1), ("demo-bank", 1), ("demo-bank", 2)]
-        assert recs[2]["seal"]["prev_hash"] == recs[1]["seal"]["hash"]
+        assert [(r["tenant"], r["sequence"]) for r in recs] == [("demo-bank", 1), ("demo-bank", 2), ("other", 1)]
+        assert recs[1]["seal"]["prev_hash"] == recs[0]["seal"]["hash"]
         assert all(r.ok for r in verify_records(recs))
         assert pg.count() == 3 and pg.streams() == ["lending"] and pg.get(recs[0]["record_id"]) == recs[0]
-        assert pg.find_decision("lending", "LN-2", tenant="demo-bank") == recs[2]["record_id"]
+        assert pg.find_decision("lending", "LN-2", tenant="demo-bank") == recs[1]["record_id"]
         assert pg.ping()
         with psycopg.connect(PG_DSN, autocommit=True) as conn:
             with pytest.raises(psycopg.Error, match="append-only"):
