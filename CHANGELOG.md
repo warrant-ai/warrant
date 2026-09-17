@@ -7,6 +7,7 @@
 - SDK records to a collector URL with `Warrant(store="https://...", token=...)`; batches are gzip-compressed and spill to disk while the collector is unreachable
 - Chains are now per tenant and stream; local SQLite stores from 0.1.0 migrate on first open; the verifier reports chains as `tenant/stream`
 - `deploy/` with a Dockerfile and a docker-compose file
+- JavaScript and TypeScript SDK: `Warrant`, `decide()`, evidence, cost, outcomes, human verdicts, redaction and background delivery to a collector with disk spill; type declarations included. Policy bundles, the local store and replay remain Python-only
 - Requires Python 3.10 or newer
 
 ## 0.1.0 (2026-09-17)

@@ -1,12 +1,15 @@
 {
   "name": "warrantai",
-  "version": "0.1.0",
+  "version": "0.2.0-dev.0",
   "description": "Warrant: the decision ledger for AI agents. Record every consequential agent action with its mandate, evidence, cost and outcome, and replay real decisions before you ship a change.",
   "license": "Apache-2.0",
   "type": "module",
   "main": "./src/index.js",
   "exports": {
-    ".": "./src/index.js",
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
+    },
     "./schema": "./schema/decision-record.v0.json",
     "./package.json": "./package.json"
   },
@@ -24,7 +27,8 @@
     "node": ">=18"
   },
   "scripts": {
-    "test": "node --test test/schema.test.js test/cli.test.js"
+    "test": "node --test test/schema.test.js test/cli.test.js test/sdk.test.js test/emit.test.js test/sink.test.js",
+    "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
     "ajv": "^8.17.1",
@@ -50,5 +54,10 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "types": "./src/index.d.ts",
+  "devDependencies": {
+    "typescript": "^6.0.0",
+    "@types/node": "^22.0.0"
   }
 }

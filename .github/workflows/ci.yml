@@ -50,5 +50,8 @@ jobs:
         working-directory: js
       - run: npm test
         working-directory: js
+      - run: npm run typecheck
+        if: matrix.node == 22
+        working-directory: js
       - run: npm pack --dry-run
         working-directory: js
