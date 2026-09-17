@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.2.0 (unreleased)
+## 0.2.0 (2026-09-17)
+
+Shared deployments and a second language: a collector and a PostgreSQL store, the JavaScript and TypeScript SDK, and policy bundles that evaluate the same way in both.
 
 - Collector: a stateless HTTP service that seals record batches into a store, with per-tenant bearer tokens, health, readiness and Prometheus metrics (`warrant collector`; extra `warrantai[collector]`)
 - PostgreSQL store for self-hosted deployments, chaining per tenant and stream under a row lock so many collectors can write concurrently
