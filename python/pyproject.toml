@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "warrantai"
-version = "0.2.0"
+version = "0.3.0.dev0"
 description = "Warrant: the decision ledger for AI agents. Record every consequential agent action with its mandate, evidence, cost and outcome, and replay real decisions before you ship a change."
 readme = "README.md"
 license = "Apache-2.0"
@@ -26,7 +26,8 @@ dependencies = ["jsonschema>=4.18"]
 policy = ["cel-python>=0.5"]
 otel = ["opentelemetry-sdk>=1.20"]
 collector = ["psycopg[binary]>=3.2", "fastapi>=0.110", "uvicorn>=0.29"]
-dev = ["pytest>=8", "build>=1.2", "cel-python>=0.5", "opentelemetry-sdk>=1.20", "psycopg[binary]>=3.2", "fastapi>=0.110", "uvicorn>=0.29", "httpx>=0.27"]
+mcp = ["mcp>=2,<3"]
+dev = ["pytest>=8", "build>=1.2", "cel-python>=0.5", "opentelemetry-sdk>=1.20", "psycopg[binary]>=3.2", "fastapi>=0.110", "uvicorn>=0.29", "httpx>=0.27", "mcp>=2,<3"]
 
 [project.scripts]
 warrant = "warrant.cli:main"

@@ -194,6 +194,29 @@ Endpoints: `POST /v1/records`, `GET /healthz`, `GET /readyz` (checks the databas
 
 Stores written by 0.1.0 chained per stream; 0.2.0 chains per tenant and stream and migrates a local store on first open.
 
+## MCP: for agents you do not write the code for
+
+Agents built in a host that speaks the Model Context Protocol can use Warrant without the SDK. The server runs over stdio, so the host launches it:
+
+```
+pip install "warrantai[mcp,policy]"
+```
+
+```json
+{"mcpServers": {"warrant": {"command": "warrant", "args": ["mcp", "--stream", "lending", "--policy", "policies/",
+  "--agent-name", "credit-underwriter", "--agent-version", "2.4.0", "--store", "https://collector.internal"],
+  "env": {"WARRANT_TOKEN": "..."}}}}
+```
+
+| Tool | When | What it does |
+|---|---|---|
+| `describe_mandate` | any time | The written policy for a decision class: clauses in order, the default, the fail mode |
+| `check_mandate` | before acting | Evaluates the policy on the inputs. Records nothing. `allowed` is true for `allow` only |
+| `record_decision` | after acting, or after holding back | Records the decision with evidence, model calls and cost. Returns the `record_id` |
+| `record_outcome` | when the result is known | Links an outcome to the decision by `record_id` or subject |
+
+What the agent cannot do matters as much. Its identity comes from the server's flags, never from a tool argument. The mandate on a record is always evaluated by the server from the inputs and cannot be supplied, so an agent that reports acting where the policy said no is recorded exactly that way, with `outside_mandate: true`, and queues for human review. There is no tool for a human verdict. A malformed call is refused with a reason and records nothing. Evidence content is hashed in the server and never stored.
+
 ## What arrives next
 
 - budget envelopes: cost ceilings per decision, workflow and day, enforced through `check()`

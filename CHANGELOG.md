@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- MCP server (`warrant mcp`, extra `warrantai[mcp]`): `describe_mandate`, `check_mandate`, `record_decision` and `record_outcome` over stdio for MCP-capable agents. The agent's identity comes from the server's configuration and the mandate is always evaluated by the server, never supplied by the agent
+
 ## 0.2.0 (2026-09-17)
 
 Shared deployments and a second language: a collector and a PostgreSQL store, the JavaScript and TypeScript SDK, and policy bundles that evaluate the same way in both.

@@ -386,6 +386,27 @@ def _cmd_collector(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_mcp(args: argparse.Namespace) -> int:
+    try:
+        from warrant.mcp_server import serve
+    except ImportError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    from warrant import AgentInfo, Warrant
+
+    # stdout belongs to the MCP transport; everything a person reads goes to stderr.
+    logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(asctime)s %(levelname)s %(message)s")
+    agent = AgentInfo(args.agent_name, args.agent_version) if args.agent_name and args.agent_version else None
+    try:
+        client = Warrant(args.stream, tenant=args.tenant, store=args.store, token=args.token, agent=agent,
+                         policy_bundle=args.policy, currency=args.currency, capture_inputs=args.capture_inputs)
+    except (ValueError, FileNotFoundError, ImportError) as exc:
+        print(f"warrant mcp: {exc}", file=sys.stderr)
+        return 2
+    serve(client)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="warrant", description="Warrant: the decision ledger for AI agents.")
     parser.add_argument("--version", action="version", version=f"warrant {__version__} (schema v{SCHEMA_VERSION})")
@@ -477,6 +498,18 @@ def build_parser() -> argparse.ArgumentParser:
     co.add_argument("--token", action="append", metavar="TENANT:TOKEN", help="bearer token per tenant (repeatable); or WARRANT_COLLECTOR_TOKENS")
     co.add_argument("--insecure", action="store_true", help="no authentication; local development only")
     co.set_defaults(func=_cmd_collector)
+
+    mc = sub.add_parser("mcp", help="run an MCP server over stdio so an MCP-capable agent can query its mandate and record decisions")
+    mc.add_argument("--stream", required=True, metavar="NAME")
+    mc.add_argument("--store", default=None, metavar="URL", help="SQLite path, postgresql:// DSN or collector URL (default $WARRANT_STORE or .warrant/records.db)")
+    mc.add_argument("--token", default=None, help="collector bearer token (default $WARRANT_TOKEN)")
+    mc.add_argument("--tenant", default=None)
+    mc.add_argument("--policy", default=None, metavar="DIR", help="policy bundle to check decisions against")
+    mc.add_argument("--agent-name", default=None, help="who the records say acted (default $WARRANT_AGENT_NAME); the agent cannot set this itself")
+    mc.add_argument("--agent-version", default=None)
+    mc.add_argument("--currency", default=None)
+    mc.add_argument("--capture-inputs", action="store_true", help="store check inputs on the record; for development and staging")
+    mc.set_defaults(func=_cmd_mcp)
     return parser
 
 
