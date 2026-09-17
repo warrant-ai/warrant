@@ -1,0 +1,68 @@
+name: Warrant replay
+description: Replay a set of real recorded agent decisions against your change and fail the check when decisions flip, a policy newly denies, or cost rises past your limit.
+author: warrant-ai
+branding:
+  icon: check-circle
+  color: green
+inputs:
+  set:
+    description: Name of the decision set in the workspace, for example lending-edge
+    required: true
+  against:
+    description: Name of the target to replay against, for example underwriter-v2.4
+    required: true
+  fail-on:
+    description: Comma list of gates; any of flipped, new-deny, new-escalate, unreplayable, errored
+    default: flipped,new-deny,unreplayable,errored
+  max-cost-increase:
+    description: Fail when cost per decision rises by more than this, for example 10%
+    default: ""
+  mode:
+    description: frozen serves recorded tool results; live calls the tools again
+    default: frozen
+  working-directory:
+    description: Directory that holds the .warrant workspace and the decider
+    default: "."
+  workspace:
+    description: Workspace directory, relative to working-directory
+    default: .warrant
+  install:
+    description: What to pip install. Pin a version for reproducible checks
+    default: warrantai[policy]
+  python-version:
+    description: Python used to run the replay
+    default: "3.12"
+outputs:
+  passed:
+    description: "true when every gate passed"
+    value: ${{ steps.replay.outputs.passed }}
+  flipped:
+    description: Number of decisions whose action changed
+    value: ${{ steps.replay.outputs.flipped }}
+  report:
+    description: Path to the JSON report
+    value: ${{ steps.replay.outputs.report }}
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+    - name: Install Warrant
+      shell: bash
+      run: python -m pip install --quiet "$WARRANT_INSTALL"
+      env:
+        WARRANT_INSTALL: ${{ inputs.install }}
+    - name: Replay
+      id: replay
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      # Inputs travel as environment variables, never interpolated into the script.
+      env:
+        WARRANT_SET: ${{ inputs.set }}
+        WARRANT_AGAINST: ${{ inputs.against }}
+        WARRANT_FAIL_ON: ${{ inputs.fail-on }}
+        WARRANT_MAX_COST: ${{ inputs.max-cost-increase }}
+        WARRANT_MODE: ${{ inputs.mode }}
+        WARRANT_WORKSPACE: ${{ inputs.workspace }}
+      run: python "$GITHUB_ACTION_PATH/run.py"

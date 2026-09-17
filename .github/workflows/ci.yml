@@ -36,6 +36,35 @@ jobs:
       - run: pip install -e "python[dev]"
       - run: pytest python
       - run: python -m build --outdir dist python
+  action:
+    # Runs the replay action the way a user's workflow would, against the lending gallery.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Baseline target changes nothing
+        id: baseline
+        uses: ./action
+        with:
+          set: lending-edge
+          against: underwriter-v2.3
+          working-directory: examples/gallery/lending
+          install: ./python[policy]
+      - name: Changed target flips decisions and fails the check
+        id: changed
+        continue-on-error: true
+        uses: ./action
+        with:
+          set: lending-edge
+          against: underwriter-v2.4
+          working-directory: examples/gallery/lending
+          install: ./python[policy]
+      - name: Outcomes are what the gallery documents
+        env:
+          BASELINE: ${{ steps.baseline.outputs.passed }}/${{ steps.baseline.outputs.flipped }}
+          CHANGED: ${{ steps.changed.outcome }}/${{ steps.changed.outputs.passed }}/${{ steps.changed.outputs.flipped }}
+        run: |
+          test "$BASELINE" = "true/0"
+          test "$CHANGED" = "failure/false/13"
   js:
     runs-on: ubuntu-latest
     strategy:
