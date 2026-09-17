@@ -54,7 +54,7 @@ clauses:
     result: deny
   - id: "4.2"
     title: Auto-approve up to 5,00,000 when bureau score >= 720 and FOIR <= 45%
-    when: amount <= 500000 && bureau_score >= 720 && foir <= 0.45
+    when: amount <= 500000 && bureau_score >= 720 && double(foir) <= 0.45
     result: allow
 tests:
   - name: within limit auto-approves
@@ -68,6 +68,8 @@ w = Warrant(stream="lending", policy_bundle="./policies", ...)
 ```
 
 `check(**inputs)` evaluates clauses in order and the first match decides. The verdict's policy id, version, clause and reason land in the record's `mandate`. If a clause cannot evaluate, for example because an input is missing, the policy's fail mode decides and the record is flagged for review. A class no policy governs returns `unchecked`. Only `allow` is `allowed`; `unchecked` is not.
+
+Two patterns are not portable between CEL engines, and the loader warns about both. Compare an input with a decimal through `double()`: write `double(foir) <= 0.45`, because a whole-number input such as `0` or `1` is an int and cel-python cannot compare an int with a double, so the fail mode would apply. Divide through `double()` too: whole numbers divide as integers, so `30000 / 50000` is `0`. The JavaScript SDK evaluates the same bundles, and both run the shared cases in `conformance/policy-cases.json`.
 
 ```
 warrant policy test ./policies                                   # runs the tests embedded in each file

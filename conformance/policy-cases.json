@@ -1,0 +1,341 @@
+{
+  "description": "CEL expressions every Warrant SDK must evaluate identically. expect is true, false or \"error\" (the clause cannot be evaluated, so the policy's fail mode applies). 'divergent' lists expressions the engines are known to disagree on; each SDK pins its own behaviour so a change in an engine is noticed, and the policy linter warns about these patterns.",
+  "cases": [
+    {
+      "name": "all conditions hold",
+      "when": "amount <= 500000 && bureau_score >= 720 && foir <= 0.45",
+      "inputs": {
+        "amount": 450000,
+        "bureau_score": 748,
+        "foir": 0.38
+      },
+      "expect": true
+    },
+    {
+      "name": "one condition fails",
+      "when": "amount <= 500000 && bureau_score >= 720 && foir <= 0.45",
+      "inputs": {
+        "amount": 450000,
+        "bureau_score": 700,
+        "foir": 0.38
+      },
+      "expect": false
+    },
+    {
+      "name": "boundary is inclusive",
+      "when": "amount <= 500000",
+      "inputs": {
+        "amount": 500000
+      },
+      "expect": true
+    },
+    {
+      "name": "missing input is an error",
+      "when": "amount <= 500000 && foir <= 0.45",
+      "inputs": {
+        "amount": 450000
+      },
+      "expect": "error"
+    },
+    {
+      "name": "a false operand decides a conjunction even when the other input is missing",
+      "when": "foir <= 0.45 && amount <= 500000",
+      "inputs": {
+        "amount": 900000
+      },
+      "expect": false
+    },
+    {
+      "name": "string where a number is expected is an error",
+      "when": "bureau_score < 650",
+      "inputs": {
+        "bureau_score": "high"
+      },
+      "expect": "error"
+    },
+    {
+      "name": "null input is an error in a comparison",
+      "when": "bureau_score < 650",
+      "inputs": {
+        "bureau_score": null
+      },
+      "expect": "error"
+    },
+    {
+      "name": "decimal input against an integer literal",
+      "when": "amount > 500000",
+      "inputs": {
+        "amount": 500000.5
+      },
+      "expect": true
+    },
+    {
+      "name": "integer arithmetic",
+      "when": "amount + fee > 1000",
+      "inputs": {
+        "amount": 900,
+        "fee": 150
+      },
+      "expect": true
+    },
+    {
+      "name": "integer equality",
+      "when": "tenure_months == 36",
+      "inputs": {
+        "tenure_months": 36
+      },
+      "expect": true
+    },
+    {
+      "name": "string equality",
+      "when": "product == 'vehicle'",
+      "inputs": {
+        "product": "vehicle"
+      },
+      "expect": true
+    },
+    {
+      "name": "string inequality",
+      "when": "product != 'vehicle'",
+      "inputs": {
+        "product": "home"
+      },
+      "expect": true
+    },
+    {
+      "name": "membership in a literal list",
+      "when": "product in ['vehicle', 'home']",
+      "inputs": {
+        "product": "gold"
+      },
+      "expect": false
+    },
+    {
+      "name": "membership in an input list",
+      "when": "'pep' in flags",
+      "inputs": {
+        "flags": [
+          "pep",
+          "adverse_media"
+        ]
+      },
+      "expect": true
+    },
+    {
+      "name": "size of a list",
+      "when": "size(flags) == 0",
+      "inputs": {
+        "flags": []
+      },
+      "expect": true
+    },
+    {
+      "name": "nested field access",
+      "when": "applicant.kyc.status == 'verified'",
+      "inputs": {
+        "applicant": {
+          "kyc": {
+            "status": "verified"
+          }
+        }
+      },
+      "expect": true
+    },
+    {
+      "name": "missing nested field is an error",
+      "when": "applicant.kyc.status == 'verified'",
+      "inputs": {
+        "applicant": {}
+      },
+      "expect": "error"
+    },
+    {
+      "name": "has() guards an optional field",
+      "when": "has(applicant.pan) && applicant.pan.startsWith('ABC')",
+      "inputs": {
+        "applicant": {}
+      },
+      "expect": false
+    },
+    {
+      "name": "has() finds a present field",
+      "when": "has(applicant.pan) && applicant.pan.startsWith('ABC')",
+      "inputs": {
+        "applicant": {
+          "pan": "ABCDE1234F"
+        }
+      },
+      "expect": true
+    },
+    {
+      "name": "boolean input",
+      "when": "is_existing_customer && amount <= 100000",
+      "inputs": {
+        "is_existing_customer": true,
+        "amount": 50000
+      },
+      "expect": true
+    },
+    {
+      "name": "negation",
+      "when": "!blacklisted",
+      "inputs": {
+        "blacklisted": false
+      },
+      "expect": true
+    },
+    {
+      "name": "or short-circuits to true",
+      "when": "vip || amount <= 1000",
+      "inputs": {
+        "vip": true,
+        "amount": 5000
+      },
+      "expect": true
+    },
+    {
+      "name": "ternary",
+      "when": "(secured ? 1000000 : 500000) >= amount",
+      "inputs": {
+        "secured": false,
+        "amount": 600000
+      },
+      "expect": false
+    },
+    {
+      "name": "string contains",
+      "when": "channel.contains('branch')",
+      "inputs": {
+        "channel": "co-op-branch-12"
+      },
+      "expect": true
+    },
+    {
+      "name": "regular expression match",
+      "when": "pan.matches('^[A-Z]{5}[0-9]{4}[A-Z]$')",
+      "inputs": {
+        "pan": "ABCDE1234F"
+      },
+      "expect": true
+    },
+    {
+      "name": "exists over a list of maps",
+      "when": "guarantors.exists(g, g.bureau_score >= 750)",
+      "inputs": {
+        "guarantors": [
+          {
+            "bureau_score": 700
+          },
+          {
+            "bureau_score": 760
+          }
+        ]
+      },
+      "expect": true
+    },
+    {
+      "name": "all over a list",
+      "when": "instalments.all(i, i <= 20000)",
+      "inputs": {
+        "instalments": [
+          15000,
+          25000
+        ]
+      },
+      "expect": false
+    },
+    {
+      "name": "non-boolean result is an error",
+      "when": "amount + 1",
+      "inputs": {
+        "amount": 1
+      },
+      "expect": "error"
+    },
+    {
+      "name": "division by zero is an error",
+      "when": "amount / count > 10",
+      "inputs": {
+        "amount": 100,
+        "count": 0
+      },
+      "expect": "error"
+    },
+    {
+      "name": "unicode strings",
+      "when": "branch == 'ಜಯನಗರ'",
+      "inputs": {
+        "branch": "ಜಯನಗರ"
+      },
+      "expect": true
+    },
+    {
+      "name": "double() makes a whole-number input comparable with a decimal literal",
+      "when": "double(foir) <= 0.45",
+      "inputs": {
+        "foir": 0
+      },
+      "expect": true
+    },
+    {
+      "name": "double() on a decimal input is a no-op",
+      "when": "double(foir) <= 0.45",
+      "inputs": {
+        "foir": 0.5
+      },
+      "expect": false
+    },
+    {
+      "name": "a ratio of whole numbers, written portably",
+      "when": "double(emi) / double(income) <= 0.45",
+      "inputs": {
+        "emi": 30000,
+        "income": 50000
+      },
+      "expect": false
+    },
+    {
+      "name": "a ratio of decimals, written portably",
+      "when": "double(emi) / double(income) <= 0.45",
+      "inputs": {
+        "emi": 18000.5,
+        "income": 50000.5
+      },
+      "expect": true
+    }
+  ],
+  "divergent": [
+    {
+      "name": "whole-number input compared with a decimal literal",
+      "when": "foir <= 0.45",
+      "inputs": {
+        "foir": 0
+      },
+      "python": "error",
+      "javascript": true,
+      "write_instead": "double(foir) <= 0.45"
+    },
+    {
+      "name": "division of two whole-number inputs is integer division",
+      "when": "emi / income <= 0.45",
+      "inputs": {
+        "emi": 30000,
+        "income": 50000
+      },
+      "python": "error",
+      "javascript": true,
+      "write_instead": "double(emi) / double(income) <= 0.45"
+    },
+    {
+      "name": "a whole-valued decimal is an int in JavaScript",
+      "when": "emi / income <= 0.45",
+      "inputs": {
+        "emi": 18000,
+        "income": 50000.5
+      },
+      "python": "error",
+      "javascript": "error",
+      "write_instead": "double(emi) / double(income) <= 0.45"
+    }
+  ]
+}

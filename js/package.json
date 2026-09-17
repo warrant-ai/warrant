@@ -10,6 +10,10 @@
       "types": "./src/index.d.ts",
       "default": "./src/index.js"
     },
+    "./policy": {
+      "types": "./src/policy.d.ts",
+      "default": "./src/policy.js"
+    },
     "./schema": "./schema/decision-record.v0.json",
     "./package.json": "./package.json"
   },
@@ -27,7 +31,7 @@
     "node": ">=18"
   },
   "scripts": {
-    "test": "node --test test/schema.test.js test/cli.test.js test/sdk.test.js test/emit.test.js test/sink.test.js",
+    "test": "node --test test/schema.test.js test/cli.test.js test/sdk.test.js test/emit.test.js test/sink.test.js test/policy.test.js",
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
@@ -58,6 +62,20 @@
   "types": "./src/index.d.ts",
   "devDependencies": {
     "typescript": "^6.0.0",
-    "@types/node": "^22.0.0"
+    "@types/node": "^22.0.0",
+    "@marcbachmann/cel-js": "^8.0.0",
+    "yaml": "^2.4.0"
+  },
+  "peerDependencies": {
+    "@marcbachmann/cel-js": "^8.0.0",
+    "yaml": "^2.4.0"
+  },
+  "peerDependenciesMeta": {
+    "@marcbachmann/cel-js": {
+      "optional": true
+    },
+    "yaml": {
+      "optional": true
+    }
   }
 }

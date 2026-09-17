@@ -46,20 +46,29 @@ await w.close();                                                               /
 
 ## Policy checks
 
-`policy` is any object with a synchronous `evaluate(decisionClass, inputs)` that returns a `Verdict`:
+The same policy bundles the Python SDK evaluates: YAML or JSON files of CEL clauses, with fail modes and embedded tests.
 
-```ts
-import { Verdict, type PolicyEngine } from "warrantai";
-
-const policy: PolicyEngine = {
-  evaluate: (_class, inputs) =>
-    Number(inputs.amount) <= 500000
-      ? new Verdict("allow", { policyId: "CR-07", policyVersion: "2026.3", clause: "4.2" })
-      : new Verdict("escalate", { policyId: "CR-07", policyVersion: "2026.3", clause: "4.3" }),
-};
+```
+npm install @marcbachmann/cel-js yaml        # optional packages; the CEL engine needs Node.js 20.19+
 ```
 
-CEL policy bundles, the format the Python SDK evaluates, are not in this package yet.
+```ts
+import { Warrant } from "warrantai";
+import { CelPolicyEngine, PolicyBundle, runPolicyTests } from "warrantai/policy";
+
+const bundle = await PolicyBundle.load("policies/");
+const failures = runPolicyTests(bundle).filter((t) => !t.passed);     // the tests embedded in each file
+const w = new Warrant("lending", { store, policy: new CelPolicyEngine(bundle) });
+```
+
+`check()` stays synchronous and in-process. The first clause whose `when` is true decides; if none matches, the policy's `default` applies; if a clause cannot be evaluated (a missing input, a type error), the policy's `fail_mode` applies and the result is flagged for review.
+
+Both SDKs run the shared cases in `conformance/policy-cases.json`, so a bundle behaves the same whichever language your agent is written in. Two patterns are not portable, and the loader warns about them:
+
+- **Compare an input with a decimal through `double()`**: write `double(foir) <= 0.45`, not `foir <= 0.45`. A whole-number input such as `0` or `1` is an int, and CEL engines disagree on comparing an int with a double.
+- **Divide through `double()`**: write `double(emi) / double(income)`. Whole numbers divide as integers, so `30000 / 50000` is `0`.
+
+Any object with a synchronous `evaluate(decisionClass, inputs)` that returns a `Verdict` also works as `policy`, if your rules live somewhere else.
 
 ## Local development
 

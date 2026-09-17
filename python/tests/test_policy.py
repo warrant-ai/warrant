@@ -32,7 +32,7 @@ clauses:
     result: deny
   - id: "4.2"
     title: Auto-approve within limit
-    when: amount <= 500000 && bureau_score >= 720 && foir <= 0.45
+    when: amount <= 500000 && bureau_score >= 720 && double(foir) <= 0.45
     result: allow
 """
 
@@ -193,3 +193,53 @@ def test_cli_policy_test_and_check(tmp_path, capsys):
     assert "CEL parse error" in capsys.readouterr().err
     assert main(["policy", "test", str(tmp_path / "missing")]) == 1
     assert main(["policy"]) == 2
+
+
+# -- portability ----------------------------------------------------------------
+
+
+def _conformance():
+    import json
+    from pathlib import Path
+
+    return json.loads((Path(__file__).parent.parent.parent / "conformance" / "policy-cases.json").read_text(encoding="utf-8"))
+
+
+def _evaluate_case(tmp_path, when, inputs):
+    import json
+
+    path = tmp_path / "bundle" / "p.json"
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(json.dumps({"policy_id": "T-1", "version": "1", "classes": ["t.run"], "fail_mode": "escalate", "default": "deny",
+                                "clauses": [{"id": "x", "when": when, "result": "allow"}]}))
+    verdict = CelPolicyEngine(PolicyBundle.load(path.parent)).evaluate("t.run", inputs)
+    return "error" if verdict.flagged else verdict.result == "allow"
+
+
+def test_shared_conformance_cases_evaluate_as_every_sdk_must(tmp_path):
+    cases = _conformance()["cases"]
+    assert len(cases) >= 30
+    for case in cases:
+        assert _evaluate_case(tmp_path, case["when"], case["inputs"]) == case["expect"], f"{case['name']}: {case['when']}"
+
+
+def test_known_engine_differences_are_pinned_and_linted(tmp_path):
+    from warrant.policy import lint_clause
+
+    for case in _conformance()["divergent"]:
+        assert _evaluate_case(tmp_path, case["when"], case["inputs"]) == case["python"], f"pinned Python behaviour changed: {case['name']}"
+        assert lint_clause(case["when"]), case["when"]
+        assert lint_clause(case["write_instead"]) == []
+
+
+def test_lint_warns_at_load_and_stays_quiet_for_portable_clauses(tmp_path, caplog):
+    import json
+    from warrant.policy import lint_clause
+
+    assert lint_clause("amount <= 500000 && double(foir) <= 0.45 && rate(x) > 0.5 && double(a) / double(b) < 1.0") == []
+    assert len(lint_clause("0.45 >= applicant.foir")) == 1
+    assert lint_clause("emi / income <= 0.45") == ["divides emi by income; whole numbers divide as integers, write double(emi) / double(income)"]
+    (tmp_path / "p.json").write_text(json.dumps({"policy_id": "T-1", "version": "1", "classes": ["t.run"], "clauses": [{"id": "a", "when": "foir <= 0.45", "result": "allow"}]}))
+    with caplog.at_level("WARNING", logger="warrant.policy"):
+        PolicyBundle.load(tmp_path)
+    assert caplog.messages == ["warrant policy T-1 clause a compares foir with a decimal literal; a whole-number input cannot be evaluated by every engine, write double(foir)"]

@@ -11,7 +11,7 @@ clauses:
     result: deny
   - id: "4.2"
     title: Auto-approve up to 5,00,000 when bureau score >= 720 and FOIR <= 45%
-    when: amount <= 500000 && bureau_score >= 720 && foir <= 0.45
+    when: amount <= 500000 && bureau_score >= 720 && double(foir) <= 0.45
     result: allow
   - id: "4.3"
     title: Refer tickets above 5,00,000 to a credit officer

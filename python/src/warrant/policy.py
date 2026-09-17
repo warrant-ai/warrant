@@ -11,7 +11,7 @@ A bundle is a directory of YAML or JSON files, one policy each::
     clauses:
       - id: "4.2"
         title: Auto-approve within limit
-        when: amount <= 500000 && bureau_score >= 720 && foir <= 0.45
+        when: amount <= 500000 && bureau_score >= 720 && double(foir) <= 0.45
         result: allow
     tests:
       - name: within limit
@@ -40,6 +40,32 @@ FAIL_MODES = ("closed", "open", "escalate")
 CLAUSE_RESULTS = ("allow", "deny", "escalate")
 _CLASS_PATTERN = re.compile(r"^[a-z0-9_]+(\.[a-z0-9_]+)*(\.\*)?$")
 _FAIL_RESULT = {"closed": "deny", "open": "allow", "escalate": "escalate"}
+
+
+# An input compared directly with a decimal literal. A whole-number input (0, 1, 40) is an
+# int, and CEL engines disagree on int-versus-double comparison; double(x) is portable.
+_BARE_DECIMAL_COMPARISON = re.compile(
+    r"(?<![\w.)])([a-z_][\w.]*)\s*(?:<=|>=|==|!=|<|>)\s*\d+\.\d+|\d+\.\d+\s*(?:<=|>=|==|!=|<|>)\s*([a-z_][\w.]*)(?![\w.(])", re.IGNORECASE
+)
+# One input divided by another. Whole numbers divide as integers (30000 / 50000 is 0).
+_BARE_DIVISION = re.compile(r"(?<![\w.)])([a-z_][\w.]*)\s*/\s*([a-z_][\w.]*)(?![\w.(])", re.IGNORECASE)
+_ENDS_WITH_OPERATOR = re.compile(r"[-+*/%]\s*$")
+
+
+def lint_clause(when: str) -> List[str]:
+    """Warn-worthy patterns in a clause. Returned, not raised: the policy still loads."""
+    warnings: List[str] = []
+    for match in _BARE_DECIMAL_COMPARISON.finditer(when):
+        # `a / b <= 0.45` compares the quotient, not b; the division warning covers it.
+        if _ENDS_WITH_OPERATOR.search(when[: match.start()]):
+            continue
+        name = match.group(1) or match.group(2)
+        warnings.append(f"compares {name} with a decimal literal; a whole-number input cannot be evaluated by every engine, write double({name})")
+    division = _BARE_DIVISION.search(when)
+    if division:
+        a, b = division.group(1), division.group(2)
+        warnings.append(f"divides {a} by {b}; whole numbers divide as integers, write double({a}) / double({b})")
+    return warnings
 
 
 class PolicyError(ValueError):
@@ -201,6 +227,8 @@ def load_policy(path: Path) -> Policy:
             programs.append(env.program(env.compile(when)))
         except celpy.CELParseError as exc:
             raise PolicyError(f"{path.name}: clause {cid}: CEL parse error: {exc}") from exc
+        for warning in lint_clause(when):
+            log.warning("warrant policy %s clause %s %s", policy_id, cid, warning)
         title = rc.get("title")
         clauses.append(Clause(id=cid, when=when.strip(), result=result, title=str(title) if title else None))
 

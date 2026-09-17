@@ -7,7 +7,10 @@
 - SDK records to a collector URL with `Warrant(store="https://...", token=...)`; batches are gzip-compressed and spill to disk while the collector is unreachable
 - Chains are now per tenant and stream; local SQLite stores from 0.1.0 migrate on first open; the verifier reports chains as `tenant/stream`
 - `deploy/` with a Dockerfile and a docker-compose file
-- JavaScript and TypeScript SDK: `Warrant`, `decide()`, evidence, cost, outcomes, human verdicts, redaction and background delivery to a collector with disk spill; type declarations included. Policy bundles, the local store and replay remain Python-only
+- JavaScript and TypeScript SDK: `Warrant`, `decide()`, evidence, cost, outcomes, human verdicts, redaction and background delivery to a collector with disk spill; type declarations included. The local store and replay remain Python-only
+- Policy bundles in JavaScript (`warrantai/policy`, optional `@marcbachmann/cel-js` and `yaml`): the same files, fail modes and embedded tests as Python
+- `conformance/policy-cases.json`: CEL cases both SDKs must evaluate identically, plus the known engine differences, pinned
+- Policy linter in both SDKs: warns at load when a clause compares an input with a decimal literal or divides two inputs without `double()`. A whole-number input (`foir: 0`) compared with `0.45` cannot be evaluated by cel-python, so the policy's fail mode applied; the example policy CR-07 now uses `double(foir)`
 - Requires Python 3.10 or newer
 
 ## 0.1.0 (2026-09-17)
