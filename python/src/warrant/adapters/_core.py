@@ -98,6 +98,7 @@ class EvidenceItem:
     name: str
     uri: str
     content_hash: str
+    type: str = "tool_call"
 
 
 @dataclass
@@ -122,22 +123,23 @@ def record(
     pricer: Optional[Pricer] = None,
     human_required: bool = False,
     human_note: Optional[str] = None,
+    record_id: Optional[str] = None,
 ) -> Tuple[str, Verdict]:
     """Write one decision record. ``status`` is ``acted``, ``withheld`` or ``failed``.
 
     The mandate is evaluated here, on the same inputs the gate saw, so the record carries
-    what the policy said and not what the adapter remembers.
+    what the policy said and not what the adapter remembers. ``record_id`` is for adapters
+    whose runtime may deliver the same attempt twice; see ``Warrant.decide``.
     """
     if status not in ("acted", "withheld", "failed"):
         raise ValueError(f"status must be acted, withheld or failed, got {status!r}")
     verdict: Optional[Verdict] = None
-    record_id = ""
     try:
-        with client.decide(mapping.decision_class, subject=subject) as d:
+        with client.decide(mapping.decision_class, subject=subject, record_id=record_id) as d:
             record_id = d.record_id
             verdict = d.check(**inputs)
             for item in list(evidence)[-MAX_EVIDENCE:]:
-                d.evidence(item.name, uri=item.uri, type="tool_call", content_hash=item.content_hash)
+                d.evidence(item.name, uri=item.uri, type=item.type, content_hash=item.content_hash)
             if result is not None:
                 d.evidence(f"{tool_name}.result", uri=f"tool://{tool_name}", type="tool_call", content=as_evidence_content(result))
             for call in usage:
@@ -162,10 +164,15 @@ def record(
 
 
 class EvidenceLog:
-    """Tool results seen in one session, kept as hashes only, waiting for the next decision."""
+    """Tool results seen in one session, kept as hashes only, waiting for the next decision.
 
-    def __init__(self) -> None:
+    ``max_sessions`` bounds the number of sessions remembered, for runtimes where a session
+    can end without a decision and nothing tells the adapter; the oldest are forgotten first.
+    """
+
+    def __init__(self, max_sessions: Optional[int] = None) -> None:
         self._by_session: Dict[str, List[EvidenceItem]] = {}
+        self._max_sessions = max_sessions
 
     def add(self, session: str, tool_name: str, call_id: str, result: Any) -> None:
         from warrant.hashing import content_hash
@@ -173,6 +180,12 @@ class EvidenceLog:
         items = self._by_session.setdefault(session, [])
         items.append(EvidenceItem(tool_name, f"tool://{tool_name}#{call_id}", content_hash(as_evidence_content(result))))
         del items[:-MAX_EVIDENCE]
+        while self._max_sessions is not None and len(self._by_session) > self._max_sessions:
+            del self._by_session[next(iter(self._by_session))]
+
+    def peek(self, session: str) -> List[EvidenceItem]:
+        """The session's evidence without clearing it: for a failed attempt the next one may still need it."""
+        return list(self._by_session.get(session, []))
 
     def take(self, session: str) -> List[EvidenceItem]:
         return self._by_session.pop(session, [])

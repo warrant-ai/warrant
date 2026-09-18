@@ -16,7 +16,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Seque
 
 from warrant.emit import Emitter, Sink
 from warrant.hashing import content_hash
-from warrant.ids import ulid
+from warrant.ids import ULID_RE, ulid
 from warrant.redaction import Redactor
 from warrant.schema import SCHEMA_VERSION, ValidationError, validate
 from warrant.store import SQLiteStore
@@ -139,13 +139,16 @@ class Decision:
         on_behalf_of: Optional[str],
         alternatives: Optional[Sequence[str]],
         replay_source: Optional[ReplaySource] = None,
+        record_id: Optional[str] = None,
     ) -> None:
         if not _CLASS_RE.match(decision_class):
             raise ValueError(f"decision class must look like 'credit.approve', got {decision_class!r}")
         if not isinstance(subject, str) or not subject:
             raise ValueError("subject must be a non-empty string")
+        if record_id is not None and not (isinstance(record_id, str) and ULID_RE.match(record_id)):
+            raise ValueError(f"record_id must be a 26-character ULID, got {record_id!r}")
         self._client = client
-        self.record_id = ulid()
+        self.record_id = record_id or ulid()
         self.decision_class = decision_class
         self.subject = subject
         self._on_behalf_of = on_behalf_of
@@ -572,9 +575,14 @@ class Warrant:
         subject: str,
         on_behalf_of: Optional[str] = None,
         alternatives: Optional[Sequence[str]] = None,
+        record_id: Optional[str] = None,
     ) -> Decision:
-        """Open a decision scope. Use as ``with w.decide("credit.approve", subject=...) as d:``."""
-        return Decision(self, decision_class, subject, on_behalf_of=on_behalf_of, alternatives=alternatives)
+        """Open a decision scope. Use as ``with w.decide("credit.approve", subject=...) as d:``.
+
+        ``record_id`` lets a caller that may record the same event twice (a retried delivery,
+        a re-run step) supply a deterministic ULID, so the store's duplicate check absorbs the repeat.
+        """
+        return Decision(self, decision_class, subject, on_behalf_of=on_behalf_of, alternatives=alternatives, record_id=record_id)
 
     def outcome(
         self,

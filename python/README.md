@@ -194,7 +194,7 @@ Endpoints: `POST /v1/records`, `GET /healthz`, `GET /readyz` (checks the databas
 
 Stores written by 0.1.0 chained per stream; 0.2.0 chains per tenant and stream and migrates a local store on first open.
 
-## Adapters: Claude Agent SDK and LangGraph
+## Adapters: Claude Agent SDK, LangGraph and Temporal
 
 If your agent is built on a framework, you do not have to wrap each decision by hand. Most tool calls are not decisions, so you name the tools that are, and how to read a decision out of each call:
 
@@ -232,6 +232,20 @@ tools = ToolNode([approve_loan, bureau_pull], wrap_tool_call=guard.wrap, awrap_t
 ```
 
 With `on_escalate="interrupt"` an escalation pauses the graph with LangGraph's `interrupt()`. Nothing runs and nothing is recorded while it waits. Resume with `Command(resume={"approve": True, "reviewer": "asha@bank.example"})`: the tool runs, and the reviewer's verdict is appended as its own sealed record. The default, `"block"`, returns an error message to the model and records the decision as withheld. Evidence is collected per `thread_id`, and only when there is one, so one customer's lookups can never land on another's decision.
+
+**Temporal** (`pip install "warrantai[temporal,policy]"`):
+
+```python
+from temporalio.worker import Worker
+from warrant.adapters.temporal import WarrantInterceptor
+
+guard = WarrantInterceptor(w, {"disburse": ToolDecision("credit.disburse", subject="loan_id",
+                                                        inputs=["amount", "bureau_score", "foir"])})
+worker = Worker(client, task_queue="lending-agents", workflows=[LoanApproval],
+                activities=[underwrite, disburse], interceptors=[guard])
+```
+
+Workflow code does not change: the decisions are the activities you name, keyed by activity type, and their arguments are read by parameter name (a single dataclass argument, field by field). A denied or escalated activity is recorded as withheld and fails with a non-retryable `ApplicationError` of type `WarrantDenied` or `WarrantEscalated`, so Temporal's retry policy does not re-run it and the workflow can catch it and hand the case to a person; the error's details carry the record id. Every record names the Temporal execution (namespace, workflow, run, activity, attempt) as evidence, so an auditor can open the run. One record per attempt: a failed attempt is a failed decision, a retry is a new record, and record ids are derived from the attempt's identity, so a batch delivered twice is written once. The run's other activities are evidence for its next decision, by hash, on the worker that ran them. `model_usage(provider, model, tokens_in=..., tokens_out=...)` called inside an activity puts the model call's cost on that activity's record. The policy check is in-process and recording is asynchronous, so Warrant being unreachable never touches an activity.
 
 ## MCP: for agents you do not write the code for
 

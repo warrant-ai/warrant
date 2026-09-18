@@ -25,7 +25,6 @@ Taxonomy (YAML or JSON)::
 from __future__ import annotations
 
 import fnmatch
-import hashlib
 import json
 import logging
 from collections import defaultdict
@@ -36,7 +35,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tupl
 
 from warrant.client import PolicyEngine, Verdict
 from warrant.hashing import content_hash
-from warrant.ids import _ALPHABET
+from warrant.ids import deterministic_ulid
 from warrant.otel_attrs import classify_attrs, first_attr, to_int
 from warrant.schema import SCHEMA_VERSION, ValidationError, validate
 from warrant.store import SQLiteStore
@@ -465,18 +464,6 @@ def _maybe_json(value: Any) -> Any:
         except json.JSONDecodeError:
             return value
     return value
-
-
-def deterministic_ulid(ts_ms: int, key: str) -> str:
-    """ULID whose random part is derived from ``key``, so re-importing the same span yields the same id."""
-    ts_ms = max(0, min(ts_ms, (1 << 48) - 1))
-    rand = int.from_bytes(hashlib.sha256(key.encode("utf-8")).digest()[:10], "big")
-    value = (ts_ms << 80) | rand
-    chars = []
-    for _ in range(26):
-        chars.append(_ALPHABET[value & 31])
-        value >>= 5
-    return "".join(reversed(chars))
 
 
 def _ns_to_iso(ns: int) -> str:
