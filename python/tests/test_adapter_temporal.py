@@ -37,18 +37,29 @@ def ledger(tmp_path):
     w.close()
 
 
-def _run(guard, loan, mode):
-    """Run the loan workflow once on Temporal's time-skipping test server and return its result."""
-    from temporalio.testing import WorkflowEnvironment
-    from temporalio.worker import Worker
+def _run(guard, loan, mode, *, review=None, replay_with=None):
+    """Run the loan workflow once on Temporal's time-skipping test server and return its result.
 
-    from temporal_app import Loan, LoanWorkflow, disburse, disburse_flaky, disburse_opaque, underwrite
+    ``review`` is sent as the ``review`` update while the workflow waits for a person.
+    ``replay_with`` replays the finished run's history against that workflow class with the guard installed.
+    """
+    from temporalio.testing import WorkflowEnvironment
+    from temporalio.worker import Replayer, Worker
+
+    from temporal_app import Loan, LoanWorkflow, disburse, disburse_flaky, disburse_loan, disburse_opaque, underwrite
 
     async def go():
         async with await WorkflowEnvironment.start_time_skipping() as env:
-            async with Worker(env.client, task_queue="lending-agents", workflows=[LoanWorkflow], activities=[underwrite, disburse, disburse_flaky, disburse_opaque],
+            activities = [underwrite, disburse, disburse_flaky, disburse_loan, disburse_opaque, guard.record_activity]
+            async with Worker(env.client, task_queue="lending-agents", workflows=[LoanWorkflow], activities=activities,
                               interceptors=[guard], activity_executor=concurrent.futures.ThreadPoolExecutor(2)):
-                return await env.client.execute_workflow(LoanWorkflow.run, args=[Loan(**loan), mode], id=f"loan-{uuid.uuid4()}", task_queue="lending-agents")
+                handle = await env.client.start_workflow(LoanWorkflow.run, args=[Loan(**loan), mode], id=f"loan-{uuid.uuid4()}", task_queue="lending-agents")
+                if review is not None:
+                    assert await handle.execute_update(LoanWorkflow.review, review) == "noted"
+                out = await handle.result()
+                if replay_with is not None:
+                    await Replayer(workflows=[replay_with], interceptors=[guard]).replay_workflow(await handle.fetch_history())
+                return out
 
     return asyncio.run(go())
 
@@ -154,3 +165,70 @@ def test_constructor_and_usage_helper_reject_misuse(ledger):
         model_usage("anthropic", "claude-sonnet-5")
     with pytest.raises(ValueError, match="26-character ULID"):
         w.decide("credit.approve", subject="LN-1", record_id="not-a-ulid")
+
+
+# -- workflow side: explicit decisions and approvals ------------------------------
+
+
+def test_workflow_side_decision_is_recorded_through_the_local_activity_and_replays(ledger):
+    from temporal_app import LoanWorkflowPatched
+
+    w, records = ledger
+    out = _run(WarrantInterceptor(w, {"disburse": DISBURSE}), GOOD, "wf", replay_with=LoanWorkflowPatched)
+    verdict = out["verdict"]
+    assert (verdict["result"], verdict["clause"], verdict["status"]) == ("allow", "4.2", "acted") and "second" not in out
+    (decision,) = records()
+    assert decision["record_id"] == verdict["record_id"]
+    assert decision["decision"] == {"class": "credit.approve", "action": "approve", "subject": "LN-1", "status": "acted", "summary": "workflow-side decision", "alternatives": ["refer", "decline"]}
+    (identity,) = decision["evidence"]
+    assert identity["name"] == "temporal.execution" and identity["uri"].startswith("temporal://default/loan-") and identity["uri"].count("/") == 4
+    assert all(r.ok for r in verify_records([decision]))
+
+
+def test_workflow_side_deny_is_withheld_and_the_workflow_branches_on_it(ledger):
+    w, records = ledger
+    out = _run(WarrantInterceptor(w, {"disburse": DISBURSE}), WEAK, "wf")
+    assert (out["verdict"]["result"], out["verdict"]["status"], out["verdict"]["clause"]) == ("deny", "withheld", "4.1")
+    (decision,) = records()
+    assert decision["decision"]["status"] == "withheld" and decision["decision"]["action"] == "none"
+
+
+def test_escalation_approved_by_a_person_runs_the_activity_and_links_the_verdict(ledger):
+    w, records = ledger
+    out = _run(WarrantInterceptor(w, {"disburse_loan": DISBURSE}), BIG, "approve", review={"approve": True, "reviewer": "asha@bank.example", "note": "DSCR checked"})
+    assert out["result"] == "disbursed LN-2"
+    withheld, verdict, acted = sorted(records(), key=lambda r: r["sequence"])
+    assert withheld["record_id"] == out["escalated"] and withheld["decision"]["status"] == "withheld" and withheld["human"]["required"] is True
+    assert verdict["record_type"] == "human_verdict" and verdict["references"] == {"decision_record_id": withheld["record_id"]}
+    assert verdict["human"]["reviewer"] == "asha@bank.example" and verdict["human"]["verdict"] == "approve" and verdict["human"]["note"] == "DSCR checked"
+    assert acted["decision"]["status"] == "acted" and acted["mandate"]["result"] == "escalate"
+    assert acted["human"] == {"required": True, "reviewer": "asha@bank.example", "note": f"approved after escalation {withheld['record_id']}"}
+    assert [e["name"] for e in withheld["evidence"]] == ["temporal.execution", "underwrite"], "the escalation took the run's evidence"
+    assert [e["name"] for e in acted["evidence"]] == ["temporal.execution", "warrant.escalation", "disburse_loan.result"]
+    assert acted["evidence"][1]["uri"] == f"warrant://record/{withheld['record_id']}"
+    assert all(r.ok for r in verify_records([withheld, verdict, acted]))
+
+
+def test_escalation_rejected_or_timed_out_records_the_verdict_and_runs_nothing(ledger):
+    w, records = ledger
+    guard = WarrantInterceptor(w, {"disburse_loan": DISBURSE})
+    rejected = _run(guard, BIG, "approve", review={"approve": False, "reviewer": "asha@bank.example", "note": "income unverified"})
+    timed_out = _run(guard, {**BIG, "loan_id": "LN-4"}, "approve")
+    assert rejected["verdict"]["verdict"] == "reject" and timed_out["timed_out"] is True
+    by_type = {}
+    for r in records():
+        by_type.setdefault(r["record_type"], []).append(r)
+    assert sorted(by_type) == ["decision", "human_verdict"] and len(by_type["decision"]) == 2, "no acted record: nothing ran"
+    notes = sorted((v["human"]["reviewer"], v["human"]["note"]) for v in by_type["human_verdict"])
+    assert notes == [("asha@bank.example", "income unverified"), ("system", "timed out")]
+    assert {v["references"]["decision_record_id"] for v in by_type["human_verdict"]} == {rejected["escalated"], timed_out["escalated"]}
+
+
+def test_a_denial_is_not_an_escalation():
+    from temporalio.exceptions import ApplicationError
+
+    from warrant.adapters.temporal_workflow import blocked, escalation
+
+    denied = ApplicationError("no", {"record_id": "X", "result": "deny"}, type="WarrantDenied", non_retryable=True)
+    assert blocked(denied) == {"record_id": "X", "result": "deny"} and escalation(denied) is None
+    assert blocked(RuntimeError("other")) is None

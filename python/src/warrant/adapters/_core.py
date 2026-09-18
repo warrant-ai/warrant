@@ -123,6 +123,7 @@ def record(
     pricer: Optional[Pricer] = None,
     human_required: bool = False,
     human_note: Optional[str] = None,
+    human_reviewer: Optional[str] = None,
     record_id: Optional[str] = None,
 ) -> Tuple[str, Verdict]:
     """Write one decision record. ``status`` is ``acted``, ``withheld`` or ``failed``.
@@ -150,8 +151,8 @@ def record(
                     except Exception as exc:  # a pricing bug must not lose the record
                         log.warning("warrant: pricer failed for %s/%s, recording cost 0: %s", call.provider, call.model, type(exc).__name__)
                 d.model_call(call.provider, call.model, tokens_in=call.tokens_in, tokens_out=call.tokens_out, amount=amount)
-            if human_required or verdict.result == "escalate":
-                d.require_human(note=human_note)
+            if human_required or human_reviewer or verdict.result == "escalate":
+                d.require_human(reviewer=human_reviewer, note=human_note)
             if status == "acted":
                 d.act(mapping.action or tool_name, cost_centre=mapping.cost_centre)
             elif status == "failed":

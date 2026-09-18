@@ -247,6 +247,32 @@ worker = Worker(client, task_queue="lending-agents", workflows=[LoanApproval],
 
 Workflow code does not change: the decisions are the activities you name, keyed by activity type, and their arguments are read by parameter name (a single dataclass argument, field by field). A denied or escalated activity is recorded as withheld and fails with a non-retryable `ApplicationError` of type `WarrantDenied` or `WarrantEscalated`, so Temporal's retry policy does not re-run it and the workflow can catch it and hand the case to a person; the error's details carry the record id. Every record names the Temporal execution (namespace, workflow, run, activity, attempt) as evidence, so an auditor can open the run. One record per attempt: a failed attempt is a failed decision, a retry is a new record, and record ids are derived from the attempt's identity, so a batch delivered twice is written once. The run's other activities are evidence for its next decision, by hash, on the worker that ran them. `model_usage(provider, model, tokens_in=..., tokens_out=...)` called inside an activity puts the model call's cost on that activity's record. The policy check is in-process and recording is asynchronous, so Warrant being unreachable never touches an activity.
 
+Workflow code can make decisions of its own and hand approvals back to escalated activities. Register `guard.record_activity` in `activities` too, and import the helpers as Temporal asks for third-party modules in workflow code:
+
+```python
+with workflow.unsafe.imports_passed_through():
+    from warrant.adapters import temporal_workflow as warrant
+
+@workflow.defn
+class LoanApproval:
+    @workflow.run
+    async def run(self, loan):
+        if workflow.patched("warrant-underwrite-decision"):
+            verdict = await warrant.decide("credit.approve", subject=loan.loan_id, inputs={...}, action="approve", summary=reason)
+        try:
+            return await workflow.execute_activity(disburse, loan, start_to_close_timeout=...)
+        except ActivityError as exc:
+            escalated = warrant.escalation(exc)
+            if escalated is None:
+                raise
+            await workflow.wait_condition(lambda: self.review is not None, timeout=timedelta(days=2))
+            if self.review.approve:
+                return await warrant.approved(disburse, loan, reviewer=self.review.reviewer, record_id=escalated["record_id"], start_to_close_timeout=...)
+            await warrant.rejected(escalated["record_id"], reviewer=self.review.reviewer, note=self.review.reason)
+```
+
+`decide()` records the workflow's own decision through a local activity, so Temporal keeps its result in history and replay never writes it twice; it returns the verdict to branch on. Its ids come from `workflow.uuid4()`, so a call added to a running workflow shifts what follows: put new call sites behind `workflow.patched`. `escalation(exc)` reads the escalated decision out of the activity error (a denial is not an escalation; nobody can approve it). `approved()` runs the activity again with the reviewer's name attached: the verdict is appended as its own sealed record, linked to the escalated decision, before the activity runs, and the activity's record names the reviewer. Who the reviewer is comes from your own Update or Signal payload; Warrant records it and does not authenticate it. `rejected()` records a rejection, or a timed-out wait.
+
 ## MCP: for agents you do not write the code for
 
 Agents built in a host that speaks the Model Context Protocol can use Warrant without the SDK. The server runs over stdio, so the host launches it:

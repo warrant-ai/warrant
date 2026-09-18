@@ -81,6 +81,22 @@ WARRANT_STORE=http://127.0.0.1:8787 WARRANT_TOKEN=a-token-of-16-chars-or-more WA
 warrant export --store .warrant/records.db -o records.jsonl && warrant verify records.jsonl
 ```
 
+## Temporal
+
+If your agent runs on Temporal, the activities you name as decisions are gated and recorded with no change to workflow code (needs `@temporalio/activity`):
+
+```js
+import { Worker } from "@temporalio/worker";
+import { ActivityDecision, warrantActivityInterceptor } from "warrantai/adapters/temporal";
+
+const guard = warrantActivityInterceptor(w, {
+  disburse: new ActivityDecision({ decisionClass: "credit.disburse", subject: "loan_id", inputs: ["amount", "bureau_score", "foir"] }),
+});
+const worker = await Worker.create({ ..., activities, interceptors: { activity: [guard] } });
+```
+
+Before a mapped activity runs, its single object argument is checked against the policy (any other call shape is presented as `{ args }` for mapping functions to read). A denied or escalated activity is recorded as withheld and fails with a non-retryable `ApplicationFailure` of type `WarrantDenied` or `WarrantEscalated`, so the retry policy does not re-run it and the workflow can catch it and hand the case to a person; the failure's details carry the record id. Every record names the Temporal execution as evidence. One record per attempt, with ids derived from the attempt's identity, so a batch delivered twice is written once. The run's other activities are evidence for its next decision, by hash. `modelUsage(provider, model, { tokensIn, tokensOut })` inside an activity puts the model call's cost on the record. Workflow-side decisions and approval hand-offs are in the Python adapter today.
+
 ## Also in the box
 
 `validate(record)` and `loadSchema()` for the decision record schema v0, `currentDecision()` for integrations, and a small CLI: `warrant --version | schema | validate <file>`.

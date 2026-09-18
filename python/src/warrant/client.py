@@ -616,17 +616,23 @@ class Warrant:
         decision_record_id: Optional[str] = None,
         note: Optional[str] = None,
         at: Union[str, datetime, None] = None,
+        record_id: Optional[str] = None,
     ) -> str:
-        """Append a human review verdict linked to a past decision. Returns the new record id."""
+        """Append a human review verdict linked to a past decision. Returns the new record id.
+
+        ``record_id`` is for callers that may deliver the same verdict twice; see ``decide``.
+        """
         if verdict not in HUMAN_VERDICTS:
             raise ValueError(f"verdict must be one of {HUMAN_VERDICTS}, got {verdict!r}")
         if not isinstance(reviewer, str) or not reviewer:
             raise ValueError("reviewer must be a non-empty string")
+        if record_id is not None and not (isinstance(record_id, str) and ULID_RE.match(record_id)):
+            raise ValueError(f"record_id must be a 26-character ULID, got {record_id!r}")
         target = self._resolve(subject, decision_record_id)
         human: Dict[str, Any] = {"required": True, "reviewer": reviewer, "verdict": verdict, "at": _as_timestamp(at)}
         if note:
             human["note"] = note
-        return self._append_linked("human_verdict", target, {"human": human})
+        return self._append_linked("human_verdict", target, {"human": human}, record_id=record_id)
 
     def _resolve(self, subject: Optional[str], decision_record_id: Optional[str]) -> str:
         if decision_record_id:
@@ -641,9 +647,9 @@ class Warrant:
             raise LookupError(f"no decision for subject {subject!r} in stream {self.stream!r}")
         return found
 
-    def _append_linked(self, record_type: str, decision_record_id: str, section: Dict[str, Any]) -> str:
+    def _append_linked(self, record_type: str, decision_record_id: str, section: Dict[str, Any], *, record_id: Optional[str] = None) -> str:
         record: Dict[str, Any] = {
-            "record_id": ulid(),
+            "record_id": record_id or ulid(),
             "record_type": record_type,
             "tenant": self.tenant,
             "stream": self.stream,

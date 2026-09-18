@@ -13,4 +13,4 @@ export { Emitter, PermanentSinkError, SinkError } from "./emit.js";
 export { HttpSink } from "./sinks.js";
 export { Redactor, TEXT_FIELDS } from "./redaction.js";
 export { canonicalJson, contentHash } from "./hashing.js";
-export { ulid } from "./ids.js";
+export { deterministicUlid, ulid } from "./ids.js";

@@ -126,11 +126,12 @@ export class Warrant {
   readonly currency: string;
   readonly agent: AgentInfo;
   /** Runs `fn` as one decision scope and records it when `fn` settles. Rethrows what `fn` throws. */
-  decide<T>(decisionClass: string, options: { subject: string; onBehalfOf?: string; alternatives?: string[] }, fn: (decision: Decision) => T | Promise<T>): Promise<T>;
+  /** `recordId` lets a caller that may record the same event twice supply a deterministic ULID. */
+  decide<T>(decisionClass: string, options: { subject: string; onBehalfOf?: string; alternatives?: string[]; recordId?: string }, fn: (decision: Decision) => T | Promise<T>): Promise<T>;
   /** Returns the new record id. */
   outcome(options: { label: string; decisionRecordId: string; observedAt?: Timestamp; score?: number; source?: string }): string;
   /** Returns the new record id. */
-  humanVerdict(options: { reviewer: string; verdict: HumanVerdict; decisionRecordId: string; note?: string; at?: Timestamp }): string;
+  humanVerdict(options: { reviewer: string; verdict: HumanVerdict; decisionRecordId: string; note?: string; at?: Timestamp; recordId?: string }): string;
   /** Resolves false on timeout. */
   flush(timeoutMs?: number): Promise<boolean>;
   close(timeoutMs?: number): Promise<void>;
@@ -165,3 +166,5 @@ export class Emitter {
 export function canonicalJson(value: unknown): string;
 export function contentHash(content: unknown): string;
 export function ulid(nowMs?: number): string;
+/** ULID derived from `key`, so a repeated event gets the same id; same bytes as the Python SDK. */
+export function deterministicUlid(tsMs: number, key: string): string;

@@ -72,12 +72,15 @@ export class Verdict {
 
 /** One consequential action, opened by `Warrant.decide()` and closed when its callback settles. */
 export class Decision {
-  constructor(client, decisionClass, { subject, onBehalfOf, alternatives } = {}) {
+  constructor(client, decisionClass, { subject, onBehalfOf, alternatives, recordId } = {}) {
     if (typeof decisionClass !== "string" || !CLASS_RE.test(decisionClass)) {
       throw new TypeError(`decision class must look like 'credit.approve', got ${JSON.stringify(decisionClass)}`);
     }
+    if (recordId !== undefined && !(typeof recordId === "string" && ULID_RE.test(recordId))) {
+      throw new TypeError(`recordId must be a 26-character ULID, got ${JSON.stringify(recordId)}`);
+    }
     this._client = client;
-    this.recordId = ulid();
+    this.recordId = recordId ?? ulid();
     this.decisionClass = decisionClass;
     this.subject = requireText(subject, "subject");
     this._onBehalfOf = onBehalfOf;
@@ -372,20 +375,23 @@ export class Warrant {
   }
 
   /** Append a human review verdict linked to a past decision. Returns the new record id. */
-  humanVerdict({ reviewer, verdict, decisionRecordId, note, at } = {}) {
+  humanVerdict({ reviewer, verdict, decisionRecordId, note, at, recordId } = {}) {
     if (!HUMAN_VERDICTS.includes(verdict)) throw new RangeError(`verdict must be one of ${HUMAN_VERDICTS.join(", ")}, got ${JSON.stringify(verdict)}`);
     requireText(reviewer, "reviewer");
     const human = { required: true, reviewer, verdict, at: asTimestamp(at) };
     if (note) human.note = note;
-    return this._appendLinked("human_verdict", decisionRecordId, { human });
+    return this._appendLinked("human_verdict", decisionRecordId, { human }, recordId);
   }
 
-  _appendLinked(recordType, decisionRecordId, section) {
+  _appendLinked(recordType, decisionRecordId, section, recordId) {
     if (typeof decisionRecordId !== "string" || !ULID_RE.test(decisionRecordId)) {
       throw new TypeError("decisionRecordId must be the record id of the decision (Decision.recordId)");
     }
+    if (recordId !== undefined && !(typeof recordId === "string" && ULID_RE.test(recordId))) {
+      throw new TypeError(`recordId must be a 26-character ULID, got ${JSON.stringify(recordId)}`);
+    }
     let record = {
-      record_id: ulid(),
+      record_id: recordId ?? ulid(),
       record_type: recordType,
       tenant: this.tenant,
       stream: this.stream,
