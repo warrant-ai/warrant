@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.3.0 (2026-09-19)
 
 Agents you do not wrap by hand: framework adapters for the Claude Agent SDK, LangGraph and Temporal, an MCP server for hosts that speak the protocol, and a GitHub Action that replays real decisions in CI.
