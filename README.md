@@ -2,7 +2,7 @@
 
 The decision ledger for AI agents. Every consequential action an agent takes is recorded with the mandate that allowed it, the evidence it used, what it cost, and how it turned out. Developers replay real recorded decisions against a changed prompt, model or policy before shipping. Risk, finance and audit teams get records they can sample and verify without trusting the vendor.
 
-Status: pre-alpha. 0.1.0 shipped the Python `decide()` SDK, CEL policy checks, the local append-only store and verifier, replay with `warrant test`, OpenTelemetry evidence capture, and `warrant import` for existing trace exports; see `python/README.md`. 0.2.0 adds the collector and a PostgreSQL store for shared deployments, the JavaScript and TypeScript SDK (`js/README.md`), and policy bundles that evaluate identically in both languages (`conformance/`).
+Status: pre-alpha. 0.1.0 shipped the Python `decide()` SDK, CEL policy checks, the local append-only store and verifier, replay with `warrant test`, OpenTelemetry evidence capture, and `warrant import` for existing trace exports; see `python/README.md`. 0.2.0 adds the collector and a PostgreSQL store for shared deployments, the JavaScript and TypeScript SDK (`js/README.md`), and policy bundles that evaluate identically in both languages (`conformance/`). 0.3.0 adds adapters for the Claude Agent SDK, LangGraph and Temporal (Python, and Temporal in JavaScript too), an MCP server, and a GitHub Action that replays recorded decisions in CI.
 
 | Package | Install | Import |
 |---|---|---|

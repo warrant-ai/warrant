@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 (2026-09-19)
+
+Agents you do not wrap by hand: framework adapters for the Claude Agent SDK, LangGraph and Temporal, an MCP server for hosts that speak the protocol, and a GitHub Action that replays real decisions in CI.
 
 - Framework adapters (`warrant.adapters`): name the tools that are decisions with `ToolDecision`, and the adapter gates them on the policy, records acted, withheld and failed decisions, and attaches the session's other tool results as evidence. Claude Agent SDK hooks (`warrantai[claude-agent]`) and a LangGraph `ToolNode` guard with `interrupt()` for escalations (`warrantai[langgraph]`), and a Temporal adapter in both SDKs (`warrantai[temporal]`, `warrantai/adapters/temporal`) that gates and records the activities named as decisions with no workflow-code change, one record per attempt with ids derived from the attempt's Temporal identity. In Python, workflow code can also record its own decisions through a local activity and hand a reviewer's approval back to an escalated activity (`warrant.adapters.temporal_workflow`)
 - `Warrant.decide(record_id=...)` and `human_verdict(record_id=...)` accept a deterministic ULID for callers whose runtime may deliver the same event twice; `deterministic_ulid` now lives in `warrant.ids`, and the JS SDK has `deterministicUlid` with the same bytes plus `recordId` on `decide()` and `humanVerdict()`

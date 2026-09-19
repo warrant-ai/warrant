@@ -2,7 +2,7 @@
 
 Warrant is the decision ledger for AI agents. Every consequential action an agent takes is recorded with the mandate that allowed it, the evidence it used, what it cost, and how it turned out. Developers replay real recorded decisions against a changed prompt, model or policy before shipping. Risk, finance and audit teams get records they can sample and verify without trusting the vendor.
 
-This is the 0.2.0 line: the decision record schema, the `decide()` SDK with a local append-only store and the offline verifier, policy bundles, replay and import, and, new in 0.2.0, a collector and a PostgreSQL store for shared deployments.
+This is the 0.3.0 line: the decision record schema, the `decide()` SDK with a local append-only store and the offline verifier, policy bundles, replay and import, a collector and a PostgreSQL store for shared deployments, and, new in 0.3.0, adapters for the Claude Agent SDK, LangGraph and Temporal, an MCP server, and a GitHub Action.
 
 ```
 pip install warrantai
