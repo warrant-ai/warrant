@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.4.0 (2026-09-20)
+
+The other half of the ledger. A decision record without an outcome is a log: this release attaches what actually happened, measures whether the stated confidence held on your own decisions, and assembles the result into something a model validation committee will read. Plus the boundary a decision model crosses, with TypeSafe's Jev as its first implementation, and the three layers composed into a worked example that runs on one machine.
+
+
 - The three layers composed, with a worked example in `examples/platform`: a Temporal workflow that adjudicates an alert through a decision model, waits on a human where the policy says so, and sets a durable ninety-day timer that wakes to link what actually happened. `python run_platform.py` runs the whole thing on one machine against Temporal's time-skipping server, so the horizon really elapses, and prints the reliability curve and an evidence pack
 - `DecisionAdapter` (`warrant.adapters.model`) is vendor-neutral and picks up Temporal by itself: inside an activity the execution lands on the record as `temporal.execution` evidence and the record id derives from the attempt, so a retry is a new record and a re-sent batch is not. The activity that makes a model decision must not also be named in the Temporal adapter's `ToolDecision` mapping, or the decision is recorded twice; `WarrantInterceptor(..., workflow_only=True)` is the shape for that case. `warrant.adapters.jev` keeps `JevModel` and re-exports the adapter
 - `temporal_workflow.verdict(record_id, reviewer=, verdict=, note=)`: record a person's approve, reject or amend against a decision already written, as a linked record. `rejected()` is now the reject case of it
