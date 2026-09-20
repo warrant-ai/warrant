@@ -21,7 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Deque, Dict, List, Optional, Sequence, Union
+from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Union
 from xml.sax.saxutils import escape
 
 from warrant.client import AgentInfo, Decision, PolicyEngine, ReplaySource, Unreplayable, decode_blob
@@ -124,6 +124,23 @@ class FrozenSource(ReplaySource):
         raise Unreplayable(f"tool {name!r} was not called in the recorded decision")
 
 
+
+class _AsOf:
+    """A policy engine pinned to one moment, so a replayed decision is judged as of its own date."""
+
+    __slots__ = ("_engine", "_at")
+
+    def __init__(self, engine: PolicyEngine, at: Optional[str]) -> None:
+        self._engine = engine
+        self._at = at
+
+    def evaluate(self, decision_class: str, inputs: Mapping[str, Any], at: Optional[str] = None) -> Verdict:
+        try:
+            return self._engine.evaluate(decision_class, inputs, at=self._at)
+        except TypeError:
+            return self._engine.evaluate(decision_class, inputs)  # an engine without dates
+
+
 class _ReplayClient:
     """The minimal client surface a Decision needs; collects the built record instead of emitting it."""
 
@@ -134,7 +151,10 @@ class _ReplayClient:
         self.stream = original.get("stream", "replay")
         self.currency = (original.get("cost") or {}).get("currency", "USD")
         self.on_behalf_of = (original.get("actor") or {}).get("on_behalf_of")
-        self.policy = policy
+        # The replayed decision opens now, but it must be judged by the policy that was in force
+        # when the original was made -- otherwise replaying October's decisions in March silently
+        # applies March's rules and the diff says the decider changed when only the calendar did.
+        self.policy = _AsOf(policy, original.get("timestamp")) if policy is not None else None
         self.redactor = None
         self.capture_inputs = False
         self.capture_evidence = False

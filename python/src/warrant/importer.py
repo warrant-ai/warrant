@@ -399,8 +399,14 @@ def _record_for(span: Span, trace: List[Span], rule: DecisionRule, tax: Taxonomy
     evidence.append({"name": str(first_attr(span.attributes, "gen_ai.tool.name") or span.name), "type": "tool_call",
                      "uri": f"otel://trace/{span.trace_id}/span/{span.span_id}", "content_hash": content_hash({"name": span.name, "attributes": span.attributes})})
 
+    occurred_at = _ns_to_iso(span.end_ns)
     if policy is not None and inputs is not None:
-        verdict = policy.evaluate(rule.decision_class, inputs)
+        # Imported decisions are historical by definition, so they are judged by the policy that
+        # was in force when they were made rather than the one in force today.
+        try:
+            verdict = policy.evaluate(rule.decision_class, inputs, at=occurred_at)
+        except TypeError:
+            verdict = policy.evaluate(rule.decision_class, inputs)
     elif policy is not None:
         verdict = Verdict("unchecked", reason="no inputs found on the decision span")
     else:
@@ -423,7 +429,7 @@ def _record_for(span: Span, trace: List[Span], rule: DecisionRule, tax: Taxonomy
         "record_type": "decision",
         "tenant": tax.tenant,
         "stream": stream,
-        "timestamp": _ns_to_iso(span.end_ns),
+        "timestamp": occurred_at,
         "schema_version": SCHEMA_VERSION,
         "origin": "imported",
         "actor": {"name": str(span.resource.get(tax.agent_name_attr) or tax.agent_name), "version": str(span.resource.get(tax.agent_version_attr) or tax.agent_version)},

@@ -1,0 +1,16 @@
+# Portfolio properties no per-decision clause can see. Evaluated after the policy has spoken, and
+# only ever able to take a decision away from the machine -- see warrant/breaker.py.
+breakers:
+  # A decider that becomes confident about everything is a failure, not a productivity win.
+  - class: aml.alert.disposition
+    metric: auto_share
+    window: 24h
+    ceiling: 0.70
+    min_decisions: 200
+
+  # The same failure from the other side: the queue that should catch the hard cases goes quiet.
+  - class: aml.alert.disposition
+    metric: escalation_share
+    window: 7d
+    floor: 0.15
+    min_decisions: 500

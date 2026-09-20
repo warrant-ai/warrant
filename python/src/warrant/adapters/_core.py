@@ -70,10 +70,13 @@ class ToolDecision:
         return subject, inputs
 
 
-def evaluate(client: Warrant, decision_class: str, inputs: Mapping[str, Any]) -> Verdict:
+def evaluate(client: Warrant, decision_class: str, inputs: Mapping[str, Any], at: Optional[str] = None) -> Verdict:
     if client.policy is None:
         return Verdict("unchecked", reason="no policy engine configured")
-    return client.policy.evaluate(decision_class, inputs)
+    try:
+        return client.policy.evaluate(decision_class, inputs, at=at)
+    except TypeError:
+        return client.policy.evaluate(decision_class, inputs)
 
 
 def blocked_message(tool_name: str, verdict: Verdict) -> str:

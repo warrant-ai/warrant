@@ -24,6 +24,7 @@ import logging
 from typing import Any, Dict, Mapping, Optional, Sequence
 
 from warrant.adapters.base import DecisionModel, ModelError, ModelResult
+from warrant.client import Verdict
 from warrant.hashing import canonical_json, content_hash
 from warrant.ids import deterministic_ulid
 
@@ -123,6 +124,11 @@ class DecisionAdapter:
     ``residency`` names the region a class's inference must happen in. The adapter refuses to send
     rather than discovering the problem in an audit.
 
+    ``breaker`` is a :class:`~warrant.breaker.Breaker`. It is consulted **after** the policy has
+    spoken and can only ever send a decision to a person: a portfolio property like "no more than
+    seventy per cent auto-closed" is invisible to a per-decision clause, and a breaker that is
+    itself broken must fail towards a human.
+
     ``registry`` is a :class:`~warrant.questions.Registry`. Given one, ``question_set`` must name a
     version it holds and the model's answers are checked against the questions that were asked, so
     an answer outside the permitted values is caught where it happened rather than surfacing as a
@@ -139,11 +145,13 @@ class DecisionAdapter:
         on_ledger_unavailable: Optional[Mapping[str, str]] = None,
         residency: Optional[Mapping[str, str]] = None,
         registry: Any = None,
+        breaker: Any = None,
         flush_timeout: float = 5.0,
     ) -> None:
         self._w = warrant
         self._model = model
         self._registry = registry
+        self._breaker = breaker
         self._persist = dict(persist or {})
         self._fail = dict(on_ledger_unavailable or {})
         self._residency = dict(residency or {})
@@ -277,9 +285,23 @@ class DecisionAdapter:
                 else self._default_inputs(state, result, disposition)
             )
             verdict = d.check(**inputs)
+            trip = self._breaker.check(decision_class) if self._breaker is not None else None
+            if trip is not None and verdict.allowed:
+                # The clause allowed it; the population did not. A breaker may take a decision away
+                # from the machine and may never hand one to it, so this only ever narrows.
+                verdict = Verdict(
+                    "escalate",
+                    policy_id=verdict.policy_id,
+                    policy_version=verdict.policy_version,
+                    clause=verdict.clause,
+                    reason=trip.reason,
+                    flagged=True,
+                )
+                d._verdict = verdict
             route = "auto" if verdict.allowed else "human"
             if not verdict.allowed:
-                d.require_human(note=f"mandate result {verdict.result}")
+                note = trip.reason if trip is not None else f"mandate result {verdict.result}"
+                d.require_human(note=note)
             d.act(
                 str(chosen.value) if verdict.allowed else "refer",
                 cost_centre=cost_centre,

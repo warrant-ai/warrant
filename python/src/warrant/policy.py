@@ -107,7 +107,25 @@ class Policy:
     title: Optional[str] = None
     tests: List[PolicyTest] = field(default_factory=list)
     source: Optional[str] = None
+    effective_from: Optional[str] = None
+    effective_to: Optional[str] = None
     _programs: List[Any] = field(default_factory=list, repr=False)
+
+    def covers(self, at: Optional[str]) -> bool:
+        """Was this version in force at ``at``? An undated policy is in force always."""
+        if at is None or (self.effective_from is None and self.effective_to is None):
+            return self.effective_from is None or self.effective_from <= (at or "")
+        if self.effective_from is not None and at < self.effective_from:
+            return False
+        if self.effective_to is not None and at >= self.effective_to:
+            return False
+        return True
+
+    @property
+    def window(self) -> str:
+        if self.effective_from is None and self.effective_to is None:
+            return "always"
+        return f"{self.effective_from or 'the beginning'} to {self.effective_to or 'further notice'}"
 
 
 @dataclass
@@ -120,20 +138,90 @@ class PolicyTestResult:
     detail: str = ""
 
 
+
+
+def _as_date(file_name: str, value: Any, field_name: str) -> Optional[str]:
+    """A date or timestamp, normalised so string comparison against a record timestamp is correct.
+
+    A bare ``2026-10-01`` becomes ``2026-10-01T00:00:00Z``: policies are written by compliance
+    teams in dates, and records carry RFC 3339 timestamps, so the two have to be made comparable
+    exactly once, here, rather than at every comparison.
+    """
+    if value is None:
+        return None
+    from datetime import date, datetime
+
+    if isinstance(value, datetime):
+        text = value.isoformat()
+    elif isinstance(value, date):
+        text = f"{value.isoformat()}T00:00:00Z"
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        if len(text) == 10:
+            text = f"{text}T00:00:00Z"
+    try:
+        datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise PolicyError(f"{file_name}: {field_name} is not a date or timestamp: {value!r}") from exc
+    return text if text.endswith("Z") else text
+
+def _overlaps(a: Policy, b: Policy) -> bool:
+    """Do two versions of a policy both govern at some moment? Undated means always."""
+    if a.effective_from is None and a.effective_to is None:
+        return True
+    if b.effective_from is None and b.effective_to is None:
+        return True
+    a_from, a_to = a.effective_from or "", a.effective_to or "9999"
+    b_from, b_to = b.effective_from or "", b.effective_to or "9999"
+    return a_from < b_to and b_from < a_to
+
+
+def _in_force(candidates: Optional[Sequence[Policy]], at: Optional[str]) -> Optional[Policy]:
+    if not candidates:
+        return None
+    if at is None:
+        # No moment given: the version in force now, which is the newest that has started.
+        now = _now_iso()
+        for policy in candidates:
+            if policy.covers(now):
+                return policy
+        return None
+    for policy in candidates:
+        if policy.covers(at):
+            return policy
+    return None
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
 class PolicyBundle:
     """A set of policies with a lookup from decision class to the governing policy."""
 
     def __init__(self, policies: Sequence[Policy]) -> None:
         self.policies: List[Policy] = list(policies)
-        self._exact: Dict[str, Policy] = {}
-        self._prefix: Dict[str, Policy] = {}
+        self._exact: Dict[str, List[Policy]] = {}
+        self._prefix: Dict[str, List[Policy]] = {}
         for policy in self.policies:
             for cls in policy.classes:
                 table = self._prefix if cls.endswith(".*") else self._exact
                 key = cls[:-2] if cls.endswith(".*") else cls
-                if key in table:
-                    raise PolicyError(f"class {cls!r} is claimed by both {table[key].policy_id} and {policy.policy_id}")
-                table[key] = policy
+                for existing in table.get(key, ()):
+                    if _overlaps(existing, policy):
+                        raise PolicyError(
+                            f"class {cls!r} is claimed by both {existing.policy_id} "
+                            f"({existing.window}) and {policy.policy_id} ({policy.window}); "
+                            "give each an effective_from so only one governs at a time"
+                        )
+                table.setdefault(key, []).append(policy)
+        # Newest first, so selection is the first version whose window covers the moment.
+        for table in (self._exact, self._prefix):
+            for key in table:
+                table[key].sort(key=lambda p: (p.effective_from or ""), reverse=True)
 
     @classmethod
     def load(cls, path: Union[str, Path]) -> "PolicyBundle":
@@ -149,16 +237,26 @@ class PolicyBundle:
         log.info("warrant policy bundle loaded: %d policy file(s) from %s", len(policies), path)
         return bundle
 
-    def policy_for(self, decision_class: str) -> Optional[Policy]:
-        """Exact class match first, then the longest matching ``prefix.*`` pattern."""
-        if decision_class in self._exact:
-            return self._exact[decision_class]
+    def policy_for(self, decision_class: str, at: Optional[str] = None) -> Optional[Policy]:
+        """The policy governing this class at ``at``: exact match first, then the longest prefix.
+
+        ``at`` is the decision's own timestamp, not the reader's clock. That is what lets a record
+        written in October be replayed in March and still be judged against the policy that was
+        actually in force when it was made — which is the whole reason versions carry dates.
+        """
+        chosen = _in_force(self._exact.get(decision_class), at)
+        if chosen is not None:
+            return chosen
         parts = decision_class.split(".")
         for i in range(len(parts) - 1, 0, -1):
-            prefix = ".".join(parts[:i])
-            if prefix in self._prefix:
-                return self._prefix[prefix]
+            chosen = _in_force(self._prefix.get(".".join(parts[:i])), at)
+            if chosen is not None:
+                return chosen
         return None
+
+    def versions_for(self, decision_class: str) -> List[Policy]:
+        """Every dated version claiming this class, newest first. For explaining a selection."""
+        return list(self._exact.get(decision_class) or [])
 
 
 def load_policy(path: Path) -> Policy:
@@ -194,6 +292,10 @@ def load_policy(path: Path) -> Policy:
     for c in classes:
         if not _CLASS_PATTERN.match(c):
             raise PolicyError(f"{path.name}: invalid class pattern {c!r} (expected e.g. credit.approve or credit.*)")
+    effective_from = _as_date(path.name, raw.get("effective_from"), "effective_from")
+    effective_to = _as_date(path.name, raw.get("effective_to"), "effective_to")
+    if effective_from and effective_to and effective_to <= effective_from:
+        raise PolicyError(f"{path.name}: effective_to must be after effective_from")
     fail_mode = str(raw.get("fail_mode", "closed"))
     if fail_mode not in FAIL_MODES:
         raise PolicyError(f"{path.name}: fail_mode must be one of {FAIL_MODES}, got {fail_mode!r}")
@@ -253,6 +355,8 @@ def load_policy(path: Path) -> Policy:
         title=str(title) if title else None,
         tests=tests,
         source=path.name,
+        effective_from=effective_from,
+        effective_to=effective_to,
         _programs=programs,
     )
 
@@ -264,9 +368,22 @@ class CelPolicyEngine:
         self.bundle = bundle
         self._celpy = _require_cel()
 
-    def evaluate(self, decision_class: str, inputs: Mapping[str, Any]) -> Verdict:
-        policy = self.bundle.policy_for(decision_class)
+    def evaluate(self, decision_class: str, inputs: Mapping[str, Any], at: Optional[str] = None) -> Verdict:
+        """Evaluate against the policy in force at ``at`` — the decision's own timestamp.
+
+        Passing the record's timestamp rather than the reader's clock is what makes a replay of a
+        historical decision honest after a policy change: it is judged by the rules that applied
+        when it was made, not by today's.
+        """
+        policy = self.bundle.policy_for(decision_class, at)
         if policy is None:
+            known = self.bundle.versions_for(decision_class)
+            if known:
+                windows = "; ".join(f"{p.policy_id}@{p.version} ({p.window})" for p in known)
+                return Verdict(
+                    "unchecked",
+                    reason=f"no version of the policy for {decision_class} was in force at {at}: {windows}",
+                )
             return Verdict("unchecked", reason=f"no policy governs class {decision_class}")
         try:
             activation = self._celpy.json_to_cel(_jsonable(inputs))

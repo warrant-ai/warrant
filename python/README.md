@@ -227,6 +227,68 @@ What counts as *right* is never inferred. You state it as a CEL expression over 
 
 `--max-ece` and `--max-mce` turn it into a CI gate, and `--report FILE` writes JSON. Predicates need the `policy` extra (`pip install "warrantai[policy]"`).
 
+## Effective-dated policies, and breakers
+
+**Policies are never edited in place.** A new version takes effect from a date, and a decision is
+judged by the version that was in force **when it was made** — not by the one in force when someone
+reads the record:
+
+```yaml
+policy_id: AML-01
+version: "2026.2"
+classes: [aml.alert.disposition]
+effective_from: 2026-10-01      # the previous version carries effective_to: 2026-10-01
+```
+
+Several dated versions of the same policy now live in one bundle. Two versions whose windows
+overlap is a load error, because then neither answer is right.
+
+This is what makes replaying history honest. A decision made in June, replayed in March after the
+auto-close threshold was raised, is still evaluated against June's policy:
+
+```
+record made 2026-06-15, replayed today
+  judged by: AML-01@2026.1
+  mandate allow -> allow, flipped=False
+```
+
+Without dates, that replay reports a flip and the diff says the decider changed when only the
+calendar did. `warrant import` does the same for reconstructed decisions: they are historical by
+definition, so they are judged by the rules that applied when they happened.
+
+### Breakers
+
+"No more than seventy per cent of alerts may be auto-closed" is not a statement about one decision,
+so it is not a policy clause — the CEL engine has no history handle, by design. It lives beside the
+policy and is evaluated after the clause has spoken:
+
+```yaml
+breakers:
+  - class: aml.alert.disposition
+    metric: auto_share          # or escalation_share
+    window: 24h
+    ceiling: 0.70               # or floor, for a queue that has gone quiet
+    min_decisions: 200          # a breaker that fires on the third decision is noise
+```
+
+```python
+from warrant.breaker import Breaker
+
+adapter = DecisionAdapter(w, model, breaker=Breaker.load("breakers.yaml", store, stream="aml"))
+```
+
+A trip forces the decision to a person, sets `mandate.flagged` and writes the reason onto the
+record, so it lands in the console's escalation queue and explains itself:
+
+```
+breaker: auto_share 0.900 is above 0.7 over 24h (200 decisions)
+```
+
+**A breaker may take a decision away from the machine and may never hand one to it.** `action:
+allow` is not configurable and never will be, so a breaker that is itself broken fails towards a
+human. `warrant breaker check` evaluates the rules against a store on demand, for a cron entry or
+an alerting hook.
+
 ## Golden sets: catching a model that changed underneath you
 
 A hosted model is updated without your consent. If the update moves confidences without changing

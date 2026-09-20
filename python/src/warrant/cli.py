@@ -604,6 +604,40 @@ def _cmd_questions_show(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_breaker_check(args: argparse.Namespace) -> int:
+    from warrant.breaker import Breaker, BreakerError, load_rules
+
+    store = _open_existing_store(args.store, read_only=True)
+    if store is None:
+        return 1
+    try:
+        rules = load_rules(args.rules)
+    except FileNotFoundError as exc:
+        print(str(exc), file=sys.stderr)
+        store.close()
+        return 1
+    except BreakerError as exc:
+        print(str(exc), file=sys.stderr)
+        store.close()
+        return 1
+    try:
+        breaker = Breaker(rules, store, stream=args.stream, cache_seconds=0)
+        classes = sorted({r.decision_class for r in rules})
+        trips = [t for t in (breaker.check(c) for c in classes) if t is not None]
+    finally:
+        store.close()
+    if args.json:
+        json.dump({"trips": [t.to_dict() for t in trips]}, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+    else:
+        print(f"{len(rules)} breaker rule(s) over {len(classes)} decision class(es)")
+        for trip in trips:
+            print(f"  TRIPPED {trip.rule.decision_class}: {trip.reason}")
+        if not trips:
+            print("  none tripped")
+    return 1 if trips else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="warrant", description="Warrant: the decision ledger for AI agents.")
     parser.add_argument("--version", action="version", version=f"warrant {__version__} (schema v{SCHEMA_VERSION})")
@@ -744,6 +778,16 @@ def build_parser() -> argparse.ArgumentParser:
     qsh.add_argument("registry", metavar="DIR")
     qsh.add_argument("ref", metavar="ID[@VERSION]", help="defaults to the latest version of that set")
     qsh.set_defaults(func=_cmd_questions_show)
+
+    bk = sub.add_parser("breaker", help="circuit breakers: portfolio limits a per-decision policy clause cannot see")
+    bk_sub = bk.add_subparsers(dest="breaker_command")
+    bk.set_defaults(func=lambda _args: (bk.print_help(), 2)[1])
+    bc = bk_sub.add_parser("check", help="evaluate the rules against what the store holds now")
+    bc.add_argument("rules", metavar="FILE", help="breaker rules, YAML or JSON")
+    bc.add_argument("--store", default=".warrant/records.db", metavar="URL")
+    bc.add_argument("--stream", metavar="NAME")
+    bc.add_argument("--json", action="store_true")
+    bc.set_defaults(func=_cmd_breaker_check)
 
     im = sub.add_parser("import", help="reconstruct decision records from OpenTelemetry trace exports")
     im.add_argument("files", nargs="+", metavar="FILE", help="OTLP JSON / JSONL or Python SDK console-exporter JSON")

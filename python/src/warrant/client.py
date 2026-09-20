@@ -116,7 +116,9 @@ class Verdict:
 
 
 class PolicyEngine(Protocol):
-    def evaluate(self, decision_class: str, inputs: Mapping[str, Any]) -> Verdict:
+    def evaluate(
+        self, decision_class: str, inputs: Mapping[str, Any], at: Optional[str] = None
+    ) -> Verdict:
         """Evaluate the mandate for one decision class against the supplied inputs."""
 
 
@@ -187,7 +189,12 @@ class Decision:
         if engine is None:
             self._verdict = Verdict("unchecked", reason="no policy engine configured")
         else:
-            self._verdict = engine.evaluate(self.decision_class, inputs)
+            # The decision's own moment, not the reader's clock: an effective-dated policy must
+            # judge this decision by the rules in force when it was made.
+            try:
+                self._verdict = engine.evaluate(self.decision_class, inputs, at=self._opened_at)
+            except TypeError:
+                self._verdict = engine.evaluate(self.decision_class, inputs)  # older engine
         return self._verdict
 
     def set_inputs(self, inputs: Mapping[str, Any]) -> None:
@@ -578,7 +585,7 @@ class Warrant:
     (``https://...``, authenticated with ``token`` or ``$WARRANT_TOKEN``), or any
     object with ``write(records)`` for custom sinks.
     ``policy_bundle`` is a directory of CEL policy files (see ``warrant.policy``);
-    ``policy`` is any object with ``evaluate(decision_class, inputs) -> Verdict``.
+    ``policy`` is any object with ``evaluate(decision_class, inputs, at=None) -> Verdict``.
     ``capture_inputs`` stores ``check()`` inputs on the record and ``capture_evidence``
     keeps tool results from ``d.tool()`` in the local store, both for replay; turn them
     on in development and staging, not where payloads must stay out of the store.
