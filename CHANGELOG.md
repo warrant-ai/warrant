@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.6.0 (2026-09-20)
+
+A field called confidence is not necessarily a confidence. The first live calls against TypeSafe's Jev showed that its `confidence` is not the quantity a Warrant record means by that name, and the adapter was passing it through into the one column every reliability curve and every confidence floor reads as a stated probability.
+
+
+- **A Choice now states `probabilities[chosen]`, not the vendor's margin.** Jev's `confidence` on a Choice is the gap between the top two probabilities: an answer of `{escalate: 0.91, close: 0.09}` reported `0.82`. Over sixty live alerts the recorded number understated the model's actual claim by **0.238 on average, 0.480 at worst** — for a binary choice `p = (margin + 1) / 2`, so it is always the lower number. That put a margin on the x-axis of a curve whose x-axis is a probability, and held a policy's `confidence >= 0.90` floor shut against answers the model was stating at 0.94. The vendor's number is used only when no distribution came back
+- **A Score now states no confidence at all.** Its value is the mean of the bucket distribution — an expectation like 1.82, which is not a value any outcome can later equal, so there is no probability that it is right, and picking a bucketing rule on the caller's behalf would be the same mistake as inferring correctness. The rubric distribution still rides along for anyone who wants to derive a calibratable classification explicitly, and `warrant calibrate` leaves scores out of the curve rather than measuring against a number that is not a probability. A Noul is unchanged: it was already a genuine probability
+- The record schema is unchanged and already said this — *"Stated probability for value. Absent when the answering model gives none."* Nothing above `warrant.adapters` changed, which is what the `DecisionModel` boundary is for
+
+**If you tuned a confidence threshold against 0.5.0 records produced by the Jev adapter, re-tune it.** The recorded confidence for a Choice has gone **up**, so a clause that rarely fired will now fire more often — the same threshold is a materially more permissive gate than it was. Records already written are not migrated: they carry the old quantity, so a curve drawn across the boundary mixes two different measurements. Scores written before this release carry a confidence that later ones do not, and `warrant calibrate` will silently include the old ones.
+
 ## 0.5.0 (2026-09-20)
 
 Measuring the thing, and guarding it. Question sets become versioned artefacts with a gate on editing one in place; a golden set catches a hosted model that changed underneath you, including when nothing flipped; policies carry dates so a historical decision is judged by the rules that applied when it was made; and circuit breakers watch the portfolio properties no per-decision clause can see.
