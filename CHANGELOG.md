@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Schema v0 additions, all optional: `decision.question_set` (registered id and semver version), `decision.state_digest` and `decision.state_ref` (hash the state, keep the snapshot separately), `decision.answers[]` (typed answers with the full distribution, not the winning value) and `decision.route` (auto, human, model, deferred). Records written before them keep validating, and the fields seal, export and verify like any other part of the body
+
 ## 0.3.0 (2026-09-19)
 
 Agents you do not wrap by hand: framework adapters for the Claude Agent SDK, LangGraph and Temporal, an MCP server for hosts that speak the protocol, and a GitHub Action that replays real decisions in CI.

@@ -63,3 +63,75 @@ test("non-object input is rejected", () => {
   assert.throws(() => validate(["not", "a", "record"]), ValidationError);
   assert.throws(() => validate(null), ValidationError);
 });
+
+// The question-set, state and answer fields are additive and optional inside schema v0.
+async function answered(overrides = {}) {
+  const record = await example("loan-approval.json");
+  Object.assign(record.decision, {
+    route: "auto",
+    question_set: { id: "credit.approve", version: "3.1.0" },
+    state_digest: "a".repeat(64),
+    state_ref: "warrant://snapshot/01J8Z5M0000000000000000000",
+    answers: [
+      {
+        question: "disposition",
+        value: "approve",
+        confidence: 0.94,
+        distribution: [
+          { value: "approve", p: 0.94 },
+          { value: "refer", p: 0.05 },
+          { value: "decline", p: 0.01 },
+        ],
+      },
+      { question: "affordability", value: 0.72, confidence: 0.81 },
+      { question: "explanation_on_file", value: true },
+    ],
+  }, overrides);
+  return record;
+}
+
+test("decision with a question set and answers is valid", async () => {
+  validate(await answered());
+});
+
+test("records without the new fields are still valid", async () => {
+  const record = await example("loan-approval.json");
+  for (const field of ["route", "question_set", "state_digest", "answers"]) {
+    assert.ok(!(field in record.decision));
+  }
+  validate(record);
+});
+
+test("unknown route is rejected", async () => {
+  const record = await answered({ route: "autoclose" });
+  assert.throws(() => validate(record), (err) => err.errors.some((m) => m.startsWith("decision/route")));
+});
+
+test("non-semver question set version is rejected", async () => {
+  const record = await answered();
+  record.decision.question_set.version = "v3";
+  assert.throws(() => validate(record), (err) => err.errors.some((m) => m.includes("question_set/version")));
+});
+
+test("confidence outside zero to one is rejected", async () => {
+  const record = await answered();
+  record.decision.answers[0].confidence = 1.4;
+  assert.throws(() => validate(record), (err) => err.errors.some((m) => m.includes("answers/0/confidence")));
+});
+
+test("answer without a value is rejected", async () => {
+  const record = await answered();
+  delete record.decision.answers[0].value;
+  assert.throws(() => validate(record), (err) => err.errors.some((m) => m.includes("answers/0")));
+});
+
+test("unknown field inside an answer is rejected", async () => {
+  const record = await answered();
+  record.decision.answers[0].rationale = "free text that belongs in an excerpt";
+  assert.throws(() => validate(record), (err) => err.errors.some((m) => m.includes("rationale")));
+});
+
+test("state digest must be a sha256", async () => {
+  const record = await answered({ state_digest: "not-a-hash" });
+  assert.throws(() => validate(record), (err) => err.errors.some((m) => m.includes("state_digest")));
+});

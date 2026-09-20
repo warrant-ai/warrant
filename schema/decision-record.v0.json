@@ -135,6 +135,115 @@
         "inputs": {
           "type": "object",
           "description": "The inputs the decision was made on, captured only when the SDK is configured with capture_inputs (development and staging). Needed for replay."
+        },
+        "route": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "human",
+            "model",
+            "deferred"
+          ],
+          "description": "Where the policy sent this decision. auto: the agent acted on its own authority. human: a person was asked. model: a second, stronger model was asked. deferred: neither, try again later. Distinct from action, which is what was decided."
+        },
+        "question_set": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "version"
+          ],
+          "description": "The registered, versioned set of questions this decision was made by answering. Stamped on every record so a reliability curve can be scoped to one version and a silent edit cannot invalidate a historical comparison.",
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z0-9_]+(\\.[a-z0-9_]+)*$"
+            },
+            "version": {
+              "type": "string",
+              "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+              "description": "Semantic version. A question removed, renamed, or with its permitted values narrowed is a major bump."
+            }
+          }
+        },
+        "state_digest": {
+          "$ref": "#/$defs/sha256",
+          "description": "Hash of the exact state the decision was made on, canonicalised before hashing. The chain proves the state was not altered; state_ref allows replay."
+        },
+        "state_ref": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Pointer to the retained state snapshot, never the snapshot itself. Snapshots carry their own retention and residency and can be redacted without breaking the chain."
+        },
+        "answers": {
+          "type": "array",
+          "description": "Typed answers the decision was composed from, with the full distribution rather than the winning value. Reliability analysis is impossible without the runners-up.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "question",
+              "value"
+            ],
+            "properties": {
+              "question": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Key of the question within the question set."
+              },
+              "value": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "boolean"
+                  }
+                ]
+              },
+              "confidence": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "description": "Stated probability for value. Absent when the answering model gives none; calibration can only measure answers that carry one."
+              },
+              "distribution": {
+                "type": "array",
+                "description": "Full categorical distribution. Omitted for continuous primitives.",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "value",
+                    "p"
+                  ],
+                  "properties": {
+                    "value": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "boolean"
+                        }
+                      ]
+                    },
+                    "p": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    }
+                  }
+                }
+              }
+            }
+          }
         }
       }
     },
