@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **A store URL that has been through `pathlib.Path` is refused instead of quietly becoming a local file.** `Path("postgresql://host/db")` stringifies back as `postgresql:/host/db` — one slash — so the DSN check missed it and `Warrant(store=...)` opened a **local SQLite file named after the URL**. Nothing raised, and the ledger looked like it was working while every record landed on one box nobody was backing up or reading. The same applied to a collector `https://` URL and to `open_store()`. Both now raise and name the remedy; the string is never repaired, because guessing at what the caller meant is how the mangling happened. Found by running `examples/platform` against PostgreSQL and finding the database empty afterwards
+- `examples/platform/run_platform.py --store` now accepts a `postgresql://` DSN as well as a local path, instead of advertising one and silently writing the other
+
 ## 0.6.0 (2026-09-20)
 
 A field called confidence is not necessarily a confidence. The first live calls against TypeSafe's Jev showed that its `confidence` is not the quantity a Warrant record means by that name, and the adapter was passing it through into the one column every reliability curve and every confidence floor reads as a stated probability.

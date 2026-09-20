@@ -96,3 +96,56 @@ def test_verifier_flags_records_without_stream_or_sequence():
     assert "sequence" in report.errors[0]
     (report,) = verify_records([{"record_id": "x", "stream": "s"}])
     assert report.stream == "(no stream)"  # no tenant, no chain
+
+
+# --- a URL that has been through Path ---------------------------------------
+#
+# `Path("postgresql://host/db")` stringifies back with one slash, so the DSN check missed it and
+# the records went to a LOCAL SQLITE FILE named after the URL. Nothing raised. Found by running
+# the platform example against PostgreSQL and finding the database empty afterwards.
+
+
+@pytest.mark.parametrize(
+    "mangled",
+    ["postgresql:/host/db", "postgres:/host/db", "http:/collector.example/v1", "https:/c.example/v1"],
+)
+def test_a_url_that_has_been_through_path_is_refused_not_opened_as_a_file(mangled):
+    from warrant.store import refuse_mangled_url
+
+    with pytest.raises(ValueError) as exc:
+        refuse_mangled_url(mangled)
+    assert "pathlib.Path" in str(exc.value)
+
+
+def test_the_client_refuses_a_dsn_wrapped_in_path(tmp_path):
+    from pathlib import Path
+
+    from warrant import Warrant
+
+    with pytest.raises(ValueError) as exc:
+        Warrant("aml", store=Path("postgresql://host/db"))
+    assert "postgresql:/" in str(exc.value)
+    # and it names the remedy rather than only the symptom
+    assert "plain string" in str(exc.value)
+
+
+def test_open_store_refuses_the_same_shape():
+    from pathlib import Path
+
+    from warrant.store import open_store
+
+    with pytest.raises(ValueError):
+        open_store(Path("postgresql://host/db"))
+
+
+def test_ordinary_stores_are_untouched_by_the_guard(tmp_path):
+    from pathlib import Path
+
+    from warrant.store import open_store, refuse_mangled_url
+
+    for fine in ["postgresql://host/db", "https://collector.example/v1", "/var/lib/records.db"]:
+        refuse_mangled_url(fine)  # must not raise
+    store = open_store(tmp_path / "records.db")
+    store.close()
+    store = open_store(str(Path(tmp_path) / "other.db"))
+    store.close()

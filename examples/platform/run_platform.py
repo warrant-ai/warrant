@@ -28,7 +28,8 @@ from pathlib import Path
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
-from warrant import AgentInfo, SQLiteStore, Warrant
+from warrant import AgentInfo, Warrant
+from warrant.store import open_store
 from warrant.adapters.base import DecisionModel, ModelAnswer, ModelResult
 from warrant.adapters.model import DecisionAdapter
 from warrant.adapters.temporal import WarrantInterceptor
@@ -140,20 +141,21 @@ def realised_outcome(rng, confidence: float) -> str:
     return "stayed_closed" if rng.random() < true_rate else "reopened"
 
 
-async def main(alerts: int, store_path: Path) -> None:
+async def main(alerts: int, store: str) -> None:
     model, live = build_model()
     print(
         f"decision model: {model.provider} "
         + (f"({JEV_MODEL}, live)" if live else "(scripted — the curve below proves nothing)")
     )
 
-    if store_path.exists():
-        store_path.unlink()
+    # A DSN is not a path: only a local file gets cleared between runs.
+    if not store.startswith(("postgres://", "postgresql://")) and Path(store).exists():
+        Path(store).unlink()
     rng = random.Random(7)
     outcomes: dict = {}
 
     client = Warrant(
-        "aml", tenant="demo-bank", store=store_path,
+        "aml", tenant="demo-bank", store=store,
         agent=AgentInfo("alert-adjudicator", "1.4.0"),
         policy_bundle=POLICIES, currency="INR", flush_interval=0.02,
     )
@@ -209,7 +211,7 @@ async def main(alerts: int, store_path: Path) -> None:
         client.close()
 
     print(f"  {auto} auto-closed, {reviewed} sent to a person\n")
-    report(store_path)
+    report(store)
 
 
 def build_questions(live: bool) -> dict:
@@ -233,44 +235,45 @@ def build_questions(live: bool) -> dict:
     return built
 
 
-def report(store_path: Path) -> None:
+def report(store: str) -> None:
     """What a design partner is shown: the curve over the automated band, then the pack."""
     from warrant.calibrate import calibrate
     from warrant.outcomes import coverage
     from warrant.pack import build_pack
 
-    store = SQLiteStore(store_path, read_only=True)
+    reader = open_store(store, read_only=True)
     try:
-        print(coverage(store, stream="aml").summary(), "\n")
+        print(coverage(reader, stream="aml").summary(), "\n")
         report = calibrate(
-            store, stream="aml",
+            reader, stream="aml",
             correct_when="outcome.label == 'stayed_closed'",
             where="decision.route == 'auto'",
             answer="disposition",
         )
         print(report.summary(), "\n")
     finally:
-        store.close()
+        reader.close()
 
     pack_dir = HERE / "pack"
     if pack_dir.exists():
         shutil.rmtree(pack_dir)
-    store = SQLiteStore(store_path, read_only=True)
+    reader = open_store(store, read_only=True)
     try:
         result = build_pack(
-            store, pack_dir, stream="aml", policy_dir=POLICIES, questions_dir=QUESTION_SETS,
+            reader, pack_dir, stream="aml", policy_dir=POLICIES, questions_dir=QUESTION_SETS,
             correct_when="outcome.label == 'stayed_closed'",
             where="decision.route == 'auto'", answer="disposition",
             title="Alert adjudication: evidence pack",
         )
     finally:
-        store.close()
+        reader.close()
     print(result.summary())
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--alerts", type=int, default=60, help="how many to run (default 60)")
-    parser.add_argument("--store", default=str(HERE / "records.db"))
+    parser.add_argument("--store", default=str(HERE / "records.db"),
+                        help="a local SQLite path, or a postgresql:// DSN")
     args = parser.parse_args()
-    asyncio.run(main(args.alerts, Path(args.store)))
+    asyncio.run(main(args.alerts, args.store))

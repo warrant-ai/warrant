@@ -9,6 +9,7 @@ DELETE so the file itself is append-only.
 from __future__ import annotations
 
 import logging
+import re
 import sqlite3
 import threading
 from pathlib import Path
@@ -56,9 +57,36 @@ BEGIN SELECT RAISE(ABORT, 'warrant records are append-only'); END;
 """
 
 
+#: A URL that has been through ``Path``: the scheme survives but ``//`` collapses to ``/``.
+_MANGLED_URL = re.compile(r"^(postgres|postgresql|http|https):(?!//)")
+
+
+def refuse_mangled_url(target: str) -> None:
+    """Refuse a DSN or collector URL that has been through ``Path``, rather than writing locally.
+
+    ``Path("postgresql://host/db")`` stringifies back as ``postgresql:/host/db`` — one slash, not
+    two — so the scheme checks below miss it and the records go to a **local SQLite file named
+    after the URL**. Nothing raises, nothing warns, and the ledger looks like it is working while
+    every decision lands on one box that nobody is backing up or reading. That is the worst failure
+    a decision ledger can have, so it fails loudly here instead.
+
+    A wrapper this close to a silent data-loss bug does not try to repair the string: guessing at
+    what the caller meant is how the mangling happened in the first place.
+    """
+    if _MANGLED_URL.match(target):
+        scheme = target.split(":", 1)[0]
+        raise ValueError(
+            f"store={target!r} looks like a {scheme} URL that has been through pathlib.Path, "
+            f"which turns '{scheme}://' into '{scheme}:/'. Left alone this would silently open a "
+            "local SQLite file with that name instead of connecting, and every record would be "
+            "written somewhere nobody is looking. Pass the URL as a plain string."
+        )
+
+
 def open_store(url: Union[str, Path], *, read_only: bool = False):
     """``postgres://...`` or ``postgresql://...`` opens a PostgreSQL store; anything else is a SQLite path."""
     text = str(url)
+    refuse_mangled_url(text)
     if text.startswith(("postgres://", "postgresql://")):
         from warrant.pg import PostgresStore
 

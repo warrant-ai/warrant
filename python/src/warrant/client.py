@@ -19,7 +19,7 @@ from warrant.hashing import content_hash
 from warrant.ids import ULID_RE, ulid
 from warrant.redaction import Redactor
 from warrant.schema import SCHEMA_VERSION, ValidationError, validate
-from warrant.store import SQLiteStore
+from warrant.store import SQLiteStore, refuse_mangled_url
 
 ROUTES = ("auto", "human", "model", "deferred")
 SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
@@ -635,6 +635,7 @@ class Warrant:
 
         if store is None or isinstance(store, (str, Path)):
             target = str(store or os.environ.get("WARRANT_STORE") or ".warrant/records.db")
+            refuse_mangled_url(target)
             if target.startswith(("http://", "https://")):
                 from warrant.sinks import HttpSink
 
