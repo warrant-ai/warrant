@@ -175,6 +175,58 @@ wrote 6 record(s) to stream 'lending-import' with origin: imported
 
 Accepted inputs are OTLP JSON or JSONL as written by the collector's file exporter, and the Python SDK's console-exporter JSON. Every matched span becomes one record with `origin: imported`; the other generative-AI spans in its trace become evidence by reference, with token usage and, if the taxonomy has a price table, cost. Record ids are derived from the trace and span ids, so importing the same export twice writes nothing new. Imported records are chained like any other, and `origin` keeps them distinguishable from records sealed at decision time. `--dry-run` reports without writing; `--report FILE` writes JSON.
 
+## Outcomes: what actually happened
+
+A decision record without an outcome is a log. The realised result — an alert reopened, a loan defaulted, a promise to pay kept — arrives days or months later and lands in someone else's system, so attaching it has to be something an operations team can do from a file rather than something an engineer does in code.
+
+```
+warrant outcomes ingest reopened-q3.csv --store .warrant/records.db --stream aml --source case-system
+```
+
+```
+read 300 row(s) from 1 file(s)
+wrote 300 outcome record(s) to stream 'aml'
+  stayed_closed: 189
+  reopened: 111
+  outcome-attached share in stream 'aml': 300/400 (75.0%)
+```
+
+The file needs a `label` column and either `subject` or `decision_record_id`; `observed_at`, `score` and `source` are optional. Each row becomes a linked `outcome` record — nothing is mutated, because the ledger is append-only. Outcome ids are derived from the decision, the label and the observation time, so re-sending last week's file writes nothing new, while a *corrected* label lands as a later record and both survive. Rows that match no decision are reported rather than raised: an operations export routinely reaches outside the window, and that is a finding, not a failure. `--dry-run` reports without writing.
+
+Nothing here cares whether the decision was recorded live or reconstructed by `warrant import`, so history whose outcomes are already known can be joined in one pass — which is the difference between a reliability curve in week one and one in month six.
+
+`warrant outcomes status` prints the outcome-attached share on its own, overall and per decision class. It is the depth metric behind every calibration claim and belongs next to any of them.
+
+## Calibrate: did the stated confidence hold?
+
+A decider that says 0.90 should be right about nine times in ten. Warrant holds both halves of that sentence — the confidence recorded at decision time in `decision.answers[]`, and the outcome recorded months later — so the claim can be measured on your own book instead of taken from a vendor's benchmark.
+
+```
+warrant calibrate --store .warrant/records.db --stream aml \
+  --correct-when "outcome.label == 'stayed_closed'" --by question_set
+```
+
+```
+calibration for stream 'aml'
+  correct when: outcome.label == 'stayed_closed'
+  400 decision(s), 400 with confidence, 300 with an outcome (75.0% attached), 300 usable
+  stated 0.741 vs observed 0.630   ECE 0.1133   MCE 0.2022   Brier 0.2279
+  band          n   stated  observed   gap
+  0.50-0.60     69   0.550     0.348  -0.202
+  0.60-0.70     64   0.650     0.656  +0.006
+  0.70-0.80     52   0.750     0.731  -0.019
+  0.80-0.90     56   0.850     0.714  -0.136
+  0.90-1.00     59   0.950     0.763  -0.187
+  by question_set:
+    aml.alert@3.1.0: n=300  stated 0.741  observed 0.630  ECE 0.1133
+```
+
+A negative gap means the decider overstated itself in that band, which is the shape that matters: it says the high-confidence band you were about to automate is not as good as it claims.
+
+What counts as *right* is never inferred. You state it as a CEL expression over the joined record, because guessing which outcomes vindicate a decision is the kind of quiet assumption that makes an evidence product worthless. `--by` breaks the curve down by `class`, `question_set`, `route` or `inputs.<field>` — per-segment calibration is usually where a single safe-looking number falls apart. Decisions with no outcome yet are excluded from the curve and counted in the header, so the coverage the number rests on is always visible beside it.
+
+`--max-ece` and `--max-mce` turn it into a CI gate, and `--report FILE` writes JSON. Predicates need the `policy` extra (`pip install "warrantai[policy]"`).
+
 ## Production: the collector and PostgreSQL
 
 For a shared, self-hosted store, run the collector in front of PostgreSQL and point agents at it. The collector is stateless; run as many as you like behind a load balancer. Chaining is serialised per tenant and stream inside PostgreSQL.

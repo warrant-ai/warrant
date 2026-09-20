@@ -407,6 +407,101 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
     return 0
 
 
+def _open_existing_store(url: str, *, read_only: bool = False):
+    """Open a store that must already exist, reporting a missing file rather than creating an empty one."""
+    from pathlib import Path
+
+    if not url.startswith(("postgres://", "postgresql://")) and not Path(url).exists():
+        print(f"{url}: no store there. Record some decisions first, or pass --store", file=sys.stderr)
+        return None
+    from warrant.store import open_store
+
+    return open_store(url, read_only=read_only)
+
+
+def _cmd_outcomes_ingest(args: argparse.Namespace) -> int:
+    from warrant.outcomes import OutcomeFileError, ingest_outcomes
+
+    store = _open_existing_store(args.store)
+    if store is None:
+        return 1
+    try:
+        report = ingest_outcomes(
+            args.files,
+            store,
+            stream=args.stream,
+            source=args.source,
+            dry_run=args.dry_run,
+        )
+    except FileNotFoundError as exc:
+        print(f"{exc.filename}: file not found", file=sys.stderr)
+        return 1
+    except (OutcomeFileError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    finally:
+        store.close()
+    print(report.summary())
+    if args.report:
+        with open(args.report, "w", encoding="utf-8") as fh:
+            json.dump(report.to_dict(), fh, indent=2)
+        print(f"json report: {args.report}")
+    if report.invalid:
+        return 1
+    return 0 if report.matched else 1
+
+
+def _cmd_outcomes_status(args: argparse.Namespace) -> int:
+    from warrant.outcomes import coverage
+
+    store = _open_existing_store(args.store, read_only=True)
+    if store is None:
+        return 1
+    try:
+        report = coverage(store, stream=args.stream)
+    finally:
+        store.close()
+    if args.json:
+        json.dump(report.to_dict(), sys.stdout, indent=2)
+        sys.stdout.write("\n")
+    else:
+        print(report.summary())
+    return 0 if report.decisions else 1
+
+
+def _cmd_calibrate(args: argparse.Namespace) -> int:
+    from warrant.calibrate import CalibrationError, calibrate, gate
+
+    store = _open_existing_store(args.store, read_only=True)
+    if store is None:
+        return 1
+    try:
+        report = calibrate(
+            store,
+            correct_when=args.correct_when,
+            stream=args.stream,
+            answer=args.answer,
+            buckets=args.buckets,
+            by=args.by,
+        )
+    except (CalibrationError, ImportError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    finally:
+        store.close()
+    print(report.summary())
+    if args.report:
+        with open(args.report, "w", encoding="utf-8") as fh:
+            json.dump(report.to_dict(), fh, indent=2)
+        print(f"json report: {args.report}")
+    failures = gate(report, max_ece=args.max_ece, max_mce=args.max_mce)
+    for failure in failures:
+        print(f"FAILED: {failure}", file=sys.stderr)
+    if failures:
+        return 1
+    return 0 if report.usable else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="warrant", description="Warrant: the decision ledger for AI agents.")
     parser.add_argument("--version", action="version", version=f"warrant {__version__} (schema v{SCHEMA_VERSION})")
@@ -481,6 +576,36 @@ def build_parser() -> argparse.ArgumentParser:
     te.add_argument("--json", metavar="FILE", help="write a JSON report")
     te.add_argument("--junit", metavar="FILE", help="write a JUnit XML report")
     te.set_defaults(func=_cmd_test)
+
+    oc = sub.add_parser("outcomes", help="attach what actually happened to decisions already recorded")
+    oc_sub = oc.add_subparsers(dest="outcomes_command")
+    oc.set_defaults(func=lambda _args: (oc.print_help(), 2)[1])
+    oi = oc_sub.add_parser("ingest", help="read a CSV of realised outcomes and link each row to its decision")
+    oi.add_argument("files", nargs="+", metavar="FILE", help="CSV with a label column and subject or decision_record_id")
+    oi.add_argument("--store", default=".warrant/records.db", metavar="URL", help="SQLite path or postgresql:// DSN")
+    oi.add_argument("--stream", required=True, metavar="NAME", help="scopes subject lookups")
+    oi.add_argument("--source", metavar="NAME", help="where the outcomes came from, when the file does not say")
+    oi.add_argument("--dry-run", action="store_true", help="report only, write nothing")
+    oi.add_argument("--report", metavar="FILE", help="write a JSON report")
+    oi.set_defaults(func=_cmd_outcomes_ingest)
+    ost = oc_sub.add_parser("status", help="outcome-attached share, overall and per decision class")
+    ost.add_argument("--store", default=".warrant/records.db", metavar="URL")
+    ost.add_argument("--stream", metavar="NAME")
+    ost.add_argument("--json", action="store_true", help="print the report as JSON")
+    ost.set_defaults(func=_cmd_outcomes_status)
+
+    cal = sub.add_parser("calibrate", help="did stated confidence match what happened? ECE and a reliability curve")
+    cal.add_argument("--store", default=".warrant/records.db", metavar="URL")
+    cal.add_argument("--stream", metavar="NAME")
+    cal.add_argument("--correct-when", required=True, metavar="CEL",
+                     help="which outcomes vindicate a decision, e.g. \"outcome.label == 'performing'\"")
+    cal.add_argument("--answer", metavar="NAME", help="which answer carries the confidence; needed when a decision has several")
+    cal.add_argument("--buckets", type=int, default=10, metavar="N", help="confidence bands (default 10)")
+    cal.add_argument("--by", metavar="DIM", help="break down by class, question_set, route or inputs.<field>")
+    cal.add_argument("--report", metavar="FILE", help="write a JSON report")
+    cal.add_argument("--max-ece", type=float, metavar="X", help="fail if Expected Calibration Error exceeds this")
+    cal.add_argument("--max-mce", type=float, metavar="X", help="fail if the worst band exceeds this")
+    cal.set_defaults(func=_cmd_calibrate)
 
     im = sub.add_parser("import", help="reconstruct decision records from OpenTelemetry trace exports")
     im.add_argument("files", nargs="+", metavar="FILE", help="OTLP JSON / JSONL or Python SDK console-exporter JSON")

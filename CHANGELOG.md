@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `warrant outcomes ingest`: attach realised outcomes to decisions already recorded, from a CSV keyed by subject or record id, with `label` and optional `observed_at`, `score` and `source`. Each row becomes a linked `outcome` record; ids derive from the decision, the label and the observation time, so re-sending a file writes nothing new and a corrected label lands as a later record with both surviving. Rows matching no decision are reported, not raised. Works the same on decisions reconstructed by `warrant import`, so history whose outcomes are already known can be joined in one pass
+- `warrant outcomes status`: the outcome-attached share, overall and per decision class — the depth metric behind every calibration claim
+- `warrant calibrate`: Expected Calibration Error, a reliability curve, MCE and Brier score over the decisions that carry both a stated confidence (`decision.answers[]`) and an outcome. What counts as correct is stated as a CEL expression over the joined record rather than inferred; `--by` breaks the curve down by `class`, `question_set`, `route` or `inputs.<field>`; `--max-ece` and `--max-mce` gate it in CI. Coverage is always printed beside the number, because a curve over 12% of decisions is a different statement from one over 90%
 - Schema v0 additions, all optional: `decision.question_set` (registered id and semver version), `decision.state_digest` and `decision.state_ref` (hash the state, keep the snapshot separately), `decision.answers[]` (typed answers with the full distribution, not the winning value) and `decision.route` (auto, human, model, deferred). Records written before them keep validating, and the fields seal, export and verify like any other part of the body
 
 ## 0.3.0 (2026-09-19)
