@@ -186,3 +186,85 @@ def test_default_store_path_from_env(tmp_path, monkeypatch, agent):
     monkeypatch.setenv("WARRANT_STORE", str(tmp_path / "env.db"))
     with Warrant("s", agent=agent) as w:
         assert w.store.path == tmp_path / "env.db"
+
+
+# --- typed answers, question sets and routing -------------------------------
+
+
+def test_answers_question_set_and_route_land_on_the_record(client):
+    with client.decide("credit.approve", subject="LN-30001") as d:
+        d.question_set("credit.retail", "3.1.0")
+        d.answer("affordability", 0.72, confidence=0.81)
+        d.answer(
+            "disposition",
+            "approve",
+            confidence=0.94,
+            distribution={"approve": 0.94, "refer": 0.05, "decline": 0.01},
+        )
+        d.act("approve", route="auto")
+
+    decision = _records(client, "decision")[0]["decision"]
+    assert decision["question_set"] == {"id": "credit.retail", "version": "3.1.0"}
+    assert decision["route"] == "auto"
+    assert [a["question"] for a in decision["answers"]] == ["affordability", "disposition"]
+    assert decision["answers"][1]["confidence"] == 0.94
+    # the runners-up survive: calibration cannot work from the argmax alone
+    assert decision["answers"][1]["distribution"] == [
+        {"value": "approve", "p": 0.94},
+        {"value": "refer", "p": 0.05},
+        {"value": "decline", "p": 0.01},
+    ]
+
+
+def test_a_decision_without_them_carries_none_of_the_fields(client):
+    with client.decide("credit.approve", subject="LN-30002") as d:
+        d.act("approve")
+    decision = _records(client, "decision")[0]["decision"]
+    assert not {"answers", "question_set", "route"} & set(decision)
+
+
+def test_answers_are_optional_and_confidence_free_answers_are_allowed(client):
+    with client.decide("credit.approve", subject="LN-30003") as d:
+        d.answer("explanation_on_file", True)
+        d.act("approve")
+    answer = _records(client, "decision")[0]["decision"]["answers"][0]
+    assert answer == {"question": "explanation_on_file", "value": True}
+
+
+@pytest.mark.parametrize(
+    "call, error",
+    [
+        (lambda d: d.answer("", "x"), ValueError),
+        (lambda d: d.answer("q", {"not": "scalar"}), TypeError),
+        (lambda d: d.answer("q", "x", confidence=1.4), ValueError),
+        (lambda d: d.answer("q", "x", confidence=-0.1), ValueError),
+        (lambda d: d.answer("q", "x", confidence="high"), TypeError),
+        (lambda d: d.answer("q", "x", confidence=True), TypeError),
+        (lambda d: d.answer("q", "x", distribution={"a": 2.0}), ValueError),
+        (lambda d: d.answer("q", "x", distribution={"a": "most"}), TypeError),
+        (lambda d: d.question_set("", "1.0.0"), ValueError),
+        (lambda d: d.question_set("credit.retail", ""), ValueError),
+    ],
+)
+def test_answer_and_question_set_validate_at_the_boundary(client, call, error):
+    with client.decide("credit.approve", subject="LN-30004") as d:
+        with pytest.raises(error):
+            call(d)
+        d.act("approve")
+
+
+def test_an_unknown_route_is_refused(client):
+    with client.decide("credit.approve", subject="LN-30005") as d:
+        with pytest.raises(ValueError) as exc:
+            d.act("approve", route="autoclose")
+        assert "route must be one of" in str(exc.value)
+        d.act("approve")
+
+
+def test_records_carrying_answers_still_seal_and_verify(client):
+    with client.decide("credit.approve", subject="LN-30006") as d:
+        d.question_set("credit.retail", "3.1.0")
+        d.answer("disposition", "approve", confidence=0.9, distribution={"approve": 0.9, "refer": 0.1})
+        d.act("approve", route="auto")
+    reports = verify_records(_records(client))
+    assert all(r.ok for r in reports), [r.errors for r in reports]

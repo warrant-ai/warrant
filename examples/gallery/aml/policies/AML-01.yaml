@@ -1,0 +1,54 @@
+policy_id: AML-01
+version: "2026.1"
+title: Transaction monitoring alert auto-closure
+classes: [aml.alert.disposition]
+# Closed: if a clause cannot be evaluated, the alert goes to a human. The cost of a needless
+# review is an analyst hour; the cost of a wrongly closed alert is a missed suspicious
+# transaction report, which is personal liability for the money laundering reporting officer.
+fail_mode: closed
+default: escalate
+clauses:
+  - id: "2.1"
+    title: Politically exposed and sanctions-adjacent segments never auto-close
+    when: segment == "pep"
+    result: escalate
+  - id: "2.2"
+    title: Trade finance never auto-closes
+    when: segment == "trade_finance"
+    result: escalate
+  - id: "2.3"
+    title: A structuring pattern is always reviewed by a person
+    when: structuring_pattern
+    result: escalate
+  - id: "2.4"
+    title: Auto-close a recommended closure at or above 0.90 confidence
+    when: disposition == "close" && double(confidence) >= 0.90
+    result: allow
+  - id: "2.5"
+    title: Anything the adjudicator does not recommend closing goes to a person
+    when: disposition != "close"
+    result: escalate
+tests:
+  - name: a confident retail closure is within mandate
+    inputs: {segment: retail, disposition: close, confidence: 0.94, structuring_pattern: false}
+    expect: allow
+    clause: "2.4"
+  - name: a politically exposed person is never auto-closed, however confident
+    inputs: {segment: pep, disposition: close, confidence: 0.98, structuring_pattern: false}
+    expect: escalate
+    clause: "2.1"
+  - name: trade finance is never auto-closed, however confident
+    inputs: {segment: trade_finance, disposition: close, confidence: 0.97, structuring_pattern: false}
+    expect: escalate
+    clause: "2.2"
+  - name: structuring outranks confidence
+    inputs: {segment: retail, disposition: close, confidence: 0.96, structuring_pattern: true}
+    expect: escalate
+    clause: "2.3"
+  - name: below the confidence floor a person decides
+    inputs: {segment: sme, disposition: close, confidence: 0.71, structuring_pattern: false}
+    expect: escalate
+  - name: a recommended escalation is an escalation
+    inputs: {segment: retail, disposition: escalate, confidence: 0.40, structuring_pattern: false}
+    expect: escalate
+    clause: "2.5"

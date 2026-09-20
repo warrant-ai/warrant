@@ -83,6 +83,7 @@ class CalibrationReport:
     stream: Optional[str] = None
     answer: Optional[str] = None
     correct_when: Optional[str] = None
+    where: Optional[str] = None
     decisions: int = 0
     with_confidence: int = 0
     with_outcome: int = 0
@@ -128,6 +129,8 @@ class CalibrationReport:
             f"calibration for stream {self.stream!r}"
             + (f", answer {self.answer!r}" if self.answer else "")
         ]
+        if self.where:
+            lines.append(f"  over decisions where: {self.where}")
         lines.append(f"  correct when: {self.correct_when}")
         share = self.with_outcome / self.decisions if self.decisions else 0.0
         lines.append(
@@ -163,6 +166,7 @@ class CalibrationReport:
             "stream": self.stream,
             "answer": self.answer,
             "correct_when": self.correct_when,
+            "where": self.where,
             "decisions": self.decisions,
             "with_confidence": self.with_confidence,
             "with_outcome": self.with_outcome,
@@ -242,6 +246,7 @@ def calibrate(
     answer: Optional[str] = None,
     buckets: int = 10,
     by: Optional[str] = None,
+    where: Optional[str] = None,
     predicate: Optional[Callable[[Dict[str, Any]], bool]] = None,
 ) -> CalibrationReport:
     """Compute ECE and a reliability curve over the decisions in ``store`` that have both halves.
@@ -249,6 +254,11 @@ def calibrate(
     ``correct_when`` is a CEL expression over the joined record (decision fields plus ``outcome``),
     compiled once; it needs the ``policy`` extra. ``predicate`` overrides the compilation and exists
     for callers that already hold one.
+
+    ``where`` narrows which decisions enter the curve at all, with the same CEL vocabulary. This is
+    usually the question worth asking: calibration over every decision is a different number from
+    calibration over the band and segment about to be automated, and it is the second that decides
+    whether automating is safe.
     """
     if buckets < 2:
         raise CalibrationError("--buckets must be 2 or more")
@@ -256,9 +266,15 @@ def calibrate(
         raise CalibrationError("--correct-when is required: state which outcomes vindicate a decision")
     is_correct = predicate or _compile(correct_when)
 
-    report = CalibrationReport(stream=stream, answer=answer, correct_when=correct_when, dimension=by)
+    included = _compile(where) if where else None
+
+    report = CalibrationReport(
+        stream=stream, answer=answer, correct_when=correct_when, dimension=by, where=where
+    )
     grouped: Dict[str, List[Point]] = {}
     for record in iter_joined(store, stream):
+        if included is not None and not included(record):
+            continue
         report.decisions += 1
         has_outcome = "outcome" in record and record["outcome"].get("status") == "observed"
         if has_outcome:

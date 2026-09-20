@@ -21,6 +21,8 @@ from warrant.redaction import Redactor
 from warrant.schema import SCHEMA_VERSION, ValidationError, validate
 from warrant.store import SQLiteStore
 
+ROUTES = ("auto", "human", "model", "deferred")
+
 log = logging.getLogger("warrant")
 
 _CLASS_RE = re.compile(r"^[a-z0-9_]+(\.[a-z0-9_]+)*$")
@@ -163,6 +165,9 @@ class Decision:
         self._cost_items: List[Dict[str, Any]] = []
         self._human: Dict[str, Any] = {"required": False}
         self._inputs: Optional[Dict[str, Any]] = None
+        self._answers: List[Dict[str, Any]] = []
+        self._question_set: Optional[Dict[str, str]] = None
+        self._route: Optional[str] = None
         self._blobs: Dict[str, Dict[str, Any]] = {}
         self._replay_source = replay_source
         self._token: Optional[contextvars.Token] = None
@@ -334,6 +339,57 @@ class Decision:
 
     # -- action and human review ----------------------------------------------
 
+    def question_set(self, set_id: str, version: str) -> None:
+        """Name the registered, versioned set of questions this decision was made by answering.
+
+        Stamped on the record so a reliability curve can be scoped to one version, and a silent
+        edit to a question cannot invalidate a historical comparison.
+        """
+        self._assert_open()
+        if not isinstance(set_id, str) or not set_id:
+            raise ValueError("question set id must be a non-empty string")
+        if not isinstance(version, str) or not version:
+            raise ValueError("question set version must be a non-empty string")
+        self._question_set = {"id": set_id, "version": version}
+
+    def answer(
+        self,
+        question: str,
+        value: Union[str, int, float, bool],
+        *,
+        confidence: Optional[float] = None,
+        distribution: Optional[Mapping[Union[str, int, float, bool], float]] = None,
+    ) -> None:
+        """Record one typed answer, with the full distribution rather than only the winning value.
+
+        Reliability analysis is impossible without the runners-up, and the spread across a
+        distribution is a better escalation trigger than top-1 confidence alone. ``confidence``
+        is what :mod:`warrant.calibrate` measures against the realised outcome.
+        """
+        self._assert_open()
+        if not isinstance(question, str) or not question:
+            raise ValueError("question must be a non-empty string")
+        if not isinstance(value, (str, int, float, bool)):
+            raise TypeError("answer value must be a string, number or boolean")
+        item: Dict[str, Any] = {"question": question, "value": value}
+        if confidence is not None:
+            if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+                raise TypeError("confidence must be a number")
+            if not 0.0 <= float(confidence) <= 1.0:
+                raise ValueError(f"confidence must be between 0 and 1, got {confidence}")
+            item["confidence"] = float(confidence)
+        if distribution is not None:
+            entries = []
+            for outcome_value, probability in distribution.items():
+                if isinstance(probability, bool) or not isinstance(probability, (int, float)):
+                    raise TypeError("distribution probabilities must be numbers")
+                if not 0.0 <= float(probability) <= 1.0:
+                    raise ValueError(f"distribution probability out of range: {probability}")
+                entries.append({"value": outcome_value, "p": float(probability)})
+            if entries:
+                item["distribution"] = entries
+        self._answers.append(item)
+
     def act(
         self,
         action: str,
@@ -341,16 +397,24 @@ class Decision:
         summary: Optional[str] = None,
         cost_centre: Optional[str] = None,
         alternatives: Optional[Sequence[str]] = None,
+        route: Optional[str] = None,
     ) -> None:
-        """Record that the action was taken. Call it once, after the action succeeds."""
+        """Record that the action was taken. Call it once, after the action succeeds.
+
+        ``route`` says where the policy sent this decision — ``auto``, ``human``, ``model`` or
+        ``deferred`` — which is a different question from ``action``, what was decided.
+        """
         self._assert_open()
         if not isinstance(action, str) or not action:
             raise ValueError("action must be a non-empty string")
         if self._action is not None:
             raise RuntimeError(f"act() already called on decision {self.record_id} with {self._action!r}")
+        if route is not None and route not in ROUTES:
+            raise ValueError(f"route must be one of {', '.join(ROUTES)}, got {route!r}")
         self._action = action
         self._summary = summary
         self._cost_centre = cost_centre
+        self._route = route
         if alternatives:
             self._alternatives = list(alternatives)
         self._acted_at = _now()
@@ -425,6 +489,12 @@ class Decision:
             decision["alternatives"] = self._alternatives
         if self._inputs is not None:
             decision["inputs"] = self._inputs
+        if self._route is not None:
+            decision["route"] = self._route
+        if self._question_set is not None:
+            decision["question_set"] = self._question_set
+        if self._answers:
+            decision["answers"] = list(self._answers)
 
         verdict = self._verdict or Verdict("unchecked")
         mandate: Dict[str, Any] = {"result": verdict.result}

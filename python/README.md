@@ -227,6 +227,42 @@ What counts as *right* is never inferred. You state it as a CEL expression over 
 
 `--max-ece` and `--max-mce` turn it into a CI gate, and `--report FILE` writes JSON. Predicates need the `policy` extra (`pip install "warrantai[policy]"`).
 
+## Pack: the artefact a committee reads
+
+Everything above produces evidence. This assembles it into something you can hand to internal audit,
+a model validation committee or a supervisor — and that a customer can extract without us, which the
+RBI's outsourcing directions require of anything a bank depends on.
+
+```
+warrant pack --store .warrant/records.db --stream aml -o ./q2-pack \
+  --policy ./policies \
+  --correct-when "outcome.label == 'stayed_closed'" --where "decision.route == 'auto'" \
+  --answer disposition --by inputs.segment
+```
+
+The pack holds `records.jsonl` (every sealed record in the period), `manifest.json` (chain head,
+counts, the policy and question-set versions in force), `coverage.json`, `calibration.json`, the
+policy text that applied, and a `README.md` front page written for a reader who will never open a
+terminal.
+
+The chain is verified before anything reaches disk: a pack that fails its own verification is never
+written, and a non-empty output directory is refused rather than overwritten.
+
+The front page states what the chain proves and what it does not. A hash chain shows these records
+have not been altered since they were sealed relative to one another; it does not show that whoever
+operates the store could not have re-sealed the whole chain. Per-writer signing and external
+anchoring are on the roadmap and are not implemented, and the pack says so rather than implying
+otherwise — an evidence store whose operator could rewrite it undetected is not independent
+evidence, and claiming otherwise is the fastest way to lose a validation committee.
+
+Verify one with nothing but the CLI:
+
+```
+cd q2-pack && warrant verify records.jsonl
+```
+
+A worked example with a deliberate calibration failure is in `examples/gallery/aml`.
+
 ## Production: the collector and PostgreSQL
 
 For a shared, self-hosted store, run the collector in front of PostgreSQL and point agents at it. The collector is stateless; run as many as you like behind a load balancer. Chaining is serialised per tenant and stream inside PostgreSQL.

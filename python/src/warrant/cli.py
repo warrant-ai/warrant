@@ -483,6 +483,7 @@ def _cmd_calibrate(args: argparse.Namespace) -> int:
             answer=args.answer,
             buckets=args.buckets,
             by=args.by,
+            where=args.where,
         )
     except (CalibrationError, ImportError) as exc:
         print(str(exc), file=sys.stderr)
@@ -500,6 +501,39 @@ def _cmd_calibrate(args: argparse.Namespace) -> int:
     if failures:
         return 1
     return 0 if report.usable else 1
+
+
+def _cmd_pack(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from warrant.calibrate import CalibrationError
+    from warrant.pack import PackError, build_pack
+
+    store = _open_existing_store(args.store, read_only=True)
+    if store is None:
+        return 1
+    try:
+        result = build_pack(
+            store,
+            Path(args.output),
+            stream=args.stream,
+            policy_dir=Path(args.policy) if args.policy else None,
+            correct_when=args.correct_when,
+            answer=args.answer,
+            by=args.by,
+            where=args.where,
+            title=args.title,
+        )
+    except (PackError, CalibrationError, ImportError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(f"{args.output}: {exc.strerror}", file=sys.stderr)
+        return 1
+    finally:
+        store.close()
+    print(result.summary())
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -602,10 +636,23 @@ def build_parser() -> argparse.ArgumentParser:
     cal.add_argument("--answer", metavar="NAME", help="which answer carries the confidence; needed when a decision has several")
     cal.add_argument("--buckets", type=int, default=10, metavar="N", help="confidence bands (default 10)")
     cal.add_argument("--by", metavar="DIM", help="break down by class, question_set, route or inputs.<field>")
+    cal.add_argument("--where", metavar="CEL", help="only these decisions, e.g. \"decision.route == 'auto'\"")
     cal.add_argument("--report", metavar="FILE", help="write a JSON report")
     cal.add_argument("--max-ece", type=float, metavar="X", help="fail if Expected Calibration Error exceeds this")
     cal.add_argument("--max-mce", type=float, metavar="X", help="fail if the worst band exceeds this")
     cal.set_defaults(func=_cmd_calibrate)
+
+    pk = sub.add_parser("pack", help="assemble an evidence pack: the records, the proof they are intact, and what they add up to")
+    pk.add_argument("--store", default=".warrant/records.db", metavar="URL")
+    pk.add_argument("--stream", metavar="NAME")
+    pk.add_argument("-o", "--output", required=True, metavar="DIR", help="a new or empty directory")
+    pk.add_argument("--policy", metavar="DIR", help="include the policy text that applied in this period")
+    pk.add_argument("--correct-when", metavar="CEL", help="add a calibration section; which outcomes vindicate a decision")
+    pk.add_argument("--answer", metavar="NAME", help="which answer carries the confidence")
+    pk.add_argument("--by", metavar="DIM", help="break the curve down by class, question_set, route or inputs.<field>")
+    pk.add_argument("--where", metavar="CEL", help="restrict the curve to these decisions, e.g. \"decision.route == 'auto'\"")
+    pk.add_argument("--title", metavar="TEXT", help="heading for the front page")
+    pk.set_defaults(func=_cmd_pack)
 
     im = sub.add_parser("import", help="reconstruct decision records from OpenTelemetry trace exports")
     im.add_argument("files", nargs="+", metavar="FILE", help="OTLP JSON / JSONL or Python SDK console-exporter JSON")
