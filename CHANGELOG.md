@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.5.0 (2026-09-20)
+
+Measuring the thing, and guarding it. Question sets become versioned artefacts with a gate on editing one in place; a golden set catches a hosted model that changed underneath you, including when nothing flipped; policies carry dates so a historical decision is judged by the rules that applied when it was made; and circuit breakers watch the portfolio properties no per-decision clause can see.
+
+
 - Effective-dated policies: `effective_from` and `effective_to` on a policy file, several dated versions of the same policy in one bundle, and selection by **the decision's own timestamp** rather than the reader's clock. Overlapping windows are a load error. This is what makes replaying history honest — a decision made in June and replayed after the threshold was raised in October is still judged by June's policy, where before the diff would have reported a flip when only the calendar had moved. `warrant import` does the same for reconstructed decisions
 - Circuit breakers (`warrant.breaker`, `warrant breaker check`): portfolio limits a per-decision clause cannot see, because the policy engine has no history handle by design. `auto_share` with a ceiling catches a decider that becomes confident about everything; `escalation_share` with a floor catches the same failure from the other side, a review queue that has gone quiet. `min_decisions` keeps a breaker from firing on the third decision of the morning
 - **A breaker may take a decision away from the machine and may never hand one to it.** `action: allow` is not configurable, so a breaker that is itself broken fails towards a person. A trip forces escalation, sets `mandate.flagged` and writes the reason onto the record, naming the clause that had allowed it
