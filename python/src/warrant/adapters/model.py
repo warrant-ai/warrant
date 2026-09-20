@@ -122,6 +122,12 @@ class DecisionAdapter:
 
     ``residency`` names the region a class's inference must happen in. The adapter refuses to send
     rather than discovering the problem in an audit.
+
+    ``registry`` is a :class:`~warrant.questions.Registry`. Given one, ``question_set`` must name a
+    version it holds and the model's answers are checked against the questions that were asked, so
+    an answer outside the permitted values is caught where it happened rather than surfacing as a
+    distortion in a reliability curve months later. Without one, the version is taken on trust —
+    which is fine for a script and wrong for anything a committee will read.
     """
 
     def __init__(
@@ -132,10 +138,12 @@ class DecisionAdapter:
         persist: Optional[Mapping[str, str]] = None,
         on_ledger_unavailable: Optional[Mapping[str, str]] = None,
         residency: Optional[Mapping[str, str]] = None,
+        registry: Any = None,
         flush_timeout: float = 5.0,
     ) -> None:
         self._w = warrant
         self._model = model
+        self._registry = registry
         self._persist = dict(persist or {})
         self._fail = dict(on_ledger_unavailable or {})
         self._residency = dict(residency or {})
@@ -190,6 +198,14 @@ class DecisionAdapter:
             raise ValueError("no questions to evaluate")
         if question_set is not None and len(tuple(question_set)) != 2:
             raise ValueError("question_set must be (id, version)")
+        registered = None
+        if self._registry is not None:
+            if question_set is None:
+                raise ValueError(
+                    "this adapter has a question set registry, so question_set=(id, version) is "
+                    "required: an unpinned set cannot be stamped on a record"
+                )
+            registered = self._registry.get(*question_set)  # raises on an unknown id or version
         self._check_residency(decision_class)
 
         serialised = canonical_state(state)
@@ -225,6 +241,14 @@ class DecisionAdapter:
                 )
 
             result = self._model.evaluate(state, questions)
+            if registered is not None:
+                from warrant.questions import check_answers
+
+                problems = check_answers(registered, result.answers)
+                if problems:
+                    raise ModelError(
+                        f"the answers do not match {registered.ref}: " + "; ".join(problems)
+                    )
 
             for answer in (result.answers[name] for name in sorted(result.answers)):
                 d.answer(

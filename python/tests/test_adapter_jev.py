@@ -376,3 +376,109 @@ def test_a_fake_model_and_the_real_adapter_are_interchangeable(client):
     assert result["disposition"].value == "close" and result.model == "fake-1"
     decision = _decisions(client)[0]["decision"]
     assert decision["answers"][0]["confidence"] == 0.88
+
+
+# --- the question set registry ----------------------------------------------
+
+
+REGISTRY_DIR = __import__("pathlib").Path(__file__).resolve().parents[2] / "examples" / "gallery" / "aml" / "question-sets"
+
+
+def _registry():
+    pytest.importorskip("yaml")
+    from warrant.questions import Registry
+
+    return Registry.load(REGISTRY_DIR)
+
+
+def _full_answers():
+    """Every question in aml.alert@3.1.0, answered legally."""
+    from warrant.adapters.base import ModelAnswer
+
+    return {
+        "profile_consistent": ModelAnswer("profile_consistent", True, 0.86),
+        "structuring_pattern": ModelAnswer("structuring_pattern", False, 0.81),
+        "counterparty_risk": ModelAnswer("counterparty_risk", 1.0, 0.74),
+        "explanation_on_file": ModelAnswer("explanation_on_file", True, 0.90),
+        "behaviour_change": ModelAnswer("behaviour_change", 0.0, 0.69),
+        "disposition": ModelAnswer("disposition", "close", 0.94, {"close": 0.94, "escalate": 0.06}),
+    }
+
+
+def test_with_a_registry_an_unpinned_set_is_refused_before_anything_runs(client):
+    fake = _FakeModel(_full_answers())
+    adapter = JevAdapter(client, fake, registry=_registry())
+    with pytest.raises(ValueError) as exc:
+        adapter.decide(
+            decision_class="aml.alert.disposition", subject="alert:1",
+            state={"segment": "retail"}, questions={"disposition": object()},
+        )
+    assert "question_set=(id, version) is required" in str(exc.value)
+    assert _decisions(client) == []
+
+
+def test_a_version_the_registry_does_not_hold_is_refused(client):
+    from warrant.questions import QuestionSetError
+
+    adapter = JevAdapter(client, _FakeModel(_full_answers()), registry=_registry())
+    with pytest.raises(QuestionSetError) as exc:
+        adapter.decide(
+            decision_class="aml.alert.disposition", subject="alert:1",
+            state={"segment": "retail"}, questions={"disposition": object()},
+            question_set=("aml.alert", "9.9.9"),
+        )
+    assert "not in the registry" in str(exc.value)
+    assert _decisions(client) == []
+
+
+def test_a_registered_set_records_normally(client):
+    adapter = JevAdapter(client, _FakeModel(_full_answers()), registry=_registry())
+    result = adapter.decide(
+        decision_class="aml.alert.disposition", subject="alert:1",
+        state={"segment": "retail"}, questions={"disposition": object()},
+        question_set=("aml.alert", "3.1.0"),
+    )
+    assert result.route in ("auto", "human")
+    assert _decisions(client)[0]["decision"]["question_set"] == {"id": "aml.alert", "version": "3.1.0"}
+
+
+def test_an_answer_outside_the_permitted_values_is_caught_where_it_happened(client):
+    """Better here than as a distortion in a reliability curve three months later."""
+    from warrant.adapters.base import ModelAnswer
+
+    answers = _full_answers()
+    answers["disposition"] = ModelAnswer("disposition", "shred", 0.99)
+    adapter = JevAdapter(client, _FakeModel(answers), registry=_registry())
+    with pytest.raises(ModelError) as exc:
+        adapter.decide(
+            decision_class="aml.alert.disposition", subject="alert:1",
+            state={"segment": "retail"}, questions={"disposition": object()},
+            question_set=("aml.alert", "3.1.0"),
+        )
+    assert "'shred' is not one of the permitted answers" in str(exc.value)
+    # it failed inside the scope, so it is a failed decision rather than a silent one
+    assert _decisions(client)[0]["decision"]["status"] == "failed"
+
+
+def test_a_missing_answer_is_caught_too(client):
+    answers = _full_answers()
+    del answers["behaviour_change"]
+    adapter = JevAdapter(client, _FakeModel(answers), registry=_registry())
+    with pytest.raises(ModelError) as exc:
+        adapter.decide(
+            decision_class="aml.alert.disposition", subject="alert:1",
+            state={"segment": "retail"}, questions={"disposition": object()},
+            question_set=("aml.alert", "3.1.0"),
+        )
+    assert "behaviour_change: not answered" in str(exc.value)
+
+
+def test_without_a_registry_the_version_is_taken_on_trust(client):
+    """Fine for a script; the registry is what a committee-facing deployment uses."""
+    adapter = JevAdapter(client, _FakeModel(_full_answers()))
+    adapter.decide(
+        decision_class="aml.alert.disposition", subject="alert:1",
+        state={"segment": "retail"}, questions={"disposition": object()},
+        question_set=("made.up", "0.0.1"),
+    )
+    assert _decisions(client)[0]["decision"]["question_set"] == {"id": "made.up", "version": "0.0.1"}

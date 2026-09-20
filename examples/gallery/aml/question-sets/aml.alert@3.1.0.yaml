@@ -1,0 +1,42 @@
+id: aml.alert
+version: "3.1.0"
+title: Transaction monitoring alert adjudication
+owner: fiu-ops@demo-bank.example
+# The version is stamped into every record that was decided by answering these questions. Editing a
+# question in place would silently invalidate every reliability curve measured against it, so each
+# change gets a new version and `warrant questions lint` checks the bump is big enough.
+questions:
+  profile_consistent:
+    primitive: noul
+    instructions: >-
+      Is the activity in this alert consistent with the customer's declared profile and stated
+      occupation, on the evidence available?
+    owner: fiu-ops@demo-bank.example
+  structuring_pattern:
+    primitive: noul
+    instructions: >-
+      Is there a pattern of transactions structured to stay below the reporting threshold?
+    owner: mlro@demo-bank.example
+  counterparty_risk:
+    primitive: score
+    instructions: >-
+      How concentrated is the risk presented by the counterparties in this alert?
+    criteria: [negligible, low, moderate, high]
+    owner: fiu-ops@demo-bank.example
+  explanation_on_file:
+    primitive: noul
+    instructions: >-
+      Is there already an explanation on file that accounts for this activity?
+    owner: fiu-ops@demo-bank.example
+  behaviour_change:
+    primitive: score
+    instructions: >-
+      How far does this activity depart from the customer's own twelve-month baseline?
+    criteria: [none, slight, marked, extreme]
+    owner: fiu-ops@demo-bank.example
+  disposition:
+    primitive: choice
+    instructions: >-
+      Should this alert be closed as unremarkable, or escalated for investigation by an analyst?
+    criteria: [close, escalate]
+    owner: mlro@demo-bank.example

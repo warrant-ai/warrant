@@ -12,6 +12,8 @@ by machine that should have become a suspicious transaction report.
 from typing import Any, Dict, Tuple
 
 QUESTION_SET = {"id": "aml.alert", "version": "3.1.0"}
+#: The questions themselves live in question-sets/aml.alert@3.1.0.yaml and are stamped on every
+#: record; `warrant questions lint` guards the version whenever one of them is edited.
 
 SEGMENTS = ("retail", "retail", "retail", "sme", "sme", "trade_finance", "pep")
 NEVER_AUTO = ("trade_finance", "pep")
@@ -56,19 +58,27 @@ def decide(d, alert: Dict[str, Any]) -> Tuple[Dict[str, Any], Any]:
         "counterparty_risk": {"value": alert["counterparty_risk"], "confidence": 0.74},
         "explanation_on_file": {"value": alert["explanation_on_file"], "confidence": 0.90},
         "behaviour_change": {"value": alert["behaviour_change"], "confidence": 0.69},
-        "disposition": {"value": "close" if close else "escalate", "confidence": confidence},
+        "disposition": {
+            "value": "close" if close else "escalate",
+            "confidence": confidence,
+            "distribution": {
+                "close" if close else "escalate": confidence,
+                "escalate" if close else "close": round(1.0 - confidence, 2),
+            },
+        },
     }
 
     d.question_set(QUESTION_SET["id"], QUESTION_SET["version"])
     for name, body in answers.items():
-        d.answer(name, body["value"], confidence=body["confidence"])
-    # The distribution, not only the winning value: the runners-up are what calibration needs.
-    d.answer(
-        "disposition_spread",
-        answers["disposition"]["value"],
-        confidence=confidence,
-        distribution={"close": confidence, "escalate": round(1.0 - confidence, 2)},
-    )
+        # The distribution, not only the winning value: the runners-up are what calibration needs.
+        # Every name here is a question in aml.alert@3.1.0 and nothing else — a record that answers
+        # a question its stated version does not contain is the drift the registry exists to stop.
+        d.answer(
+            name,
+            body["value"],
+            confidence=body["confidence"],
+            distribution=body.get("distribution"),
+        )
 
     verdict = d.check(
         segment=alert["segment"],

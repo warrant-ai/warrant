@@ -518,6 +518,7 @@ def _cmd_pack(args: argparse.Namespace) -> int:
             Path(args.output),
             stream=args.stream,
             policy_dir=Path(args.policy) if args.policy else None,
+            questions_dir=Path(args.questions) if args.questions else None,
             correct_when=args.correct_when,
             answer=args.answer,
             by=args.by,
@@ -533,6 +534,73 @@ def _cmd_pack(args: argparse.Namespace) -> int:
     finally:
         store.close()
     print(result.summary())
+    return 0
+
+
+def _cmd_questions_lint(args: argparse.Namespace) -> int:
+    from warrant.questions import QuestionSetError, Registry, lint
+
+    try:
+        registry = Registry.load(args.registry)
+    except FileNotFoundError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    except QuestionSetError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    report = lint(registry)
+    if args.json:
+        json.dump(report.to_dict(), sys.stdout, indent=2)
+        sys.stdout.write("\n")
+    else:
+        print(report.summary())
+    return 0 if report.ok else 1
+
+
+def _cmd_questions_diff(args: argparse.Namespace) -> int:
+    from warrant.questions import QuestionSetError, Registry, compare
+
+    try:
+        registry = Registry.load(args.registry)
+        before = _resolve_ref(registry, args.before)
+        after = _resolve_ref(registry, args.after, default_id=before.id)
+    except (FileNotFoundError, QuestionSetError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    comparison = compare(before, after)
+    if args.json:
+        json.dump(comparison.to_dict(), sys.stdout, indent=2)
+        sys.stdout.write("\n")
+    else:
+        print(comparison.summary())
+    return 0 if comparison.sufficient else 1
+
+
+def _resolve_ref(registry, ref: str, default_id: Optional[str] = None):
+    """Accept ``set.id@1.2.3`` or a bare ``1.2.3`` once the set is known from the other side."""
+    from warrant.questions import QuestionSetError
+
+    if "@" in ref:
+        set_id, _, version = ref.partition("@")
+        return registry.get(set_id, version)
+    if default_id is None:
+        raise QuestionSetError(f"{ref!r} needs a set id, e.g. aml.alert@{ref}")
+    return registry.get(default_id, ref)
+
+
+def _cmd_questions_show(args: argparse.Namespace) -> int:
+    from warrant.questions import QuestionSetError, Registry
+
+    try:
+        registry = Registry.load(args.registry)
+        question_set = (
+            _resolve_ref(registry, args.ref) if "@" in args.ref else registry.latest(args.ref)
+        )
+    except (FileNotFoundError, QuestionSetError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    json.dump(question_set.to_dict(), sys.stdout, indent=2)
+    sys.stdout.write("\n")
     return 0
 
 
@@ -647,12 +715,31 @@ def build_parser() -> argparse.ArgumentParser:
     pk.add_argument("--stream", metavar="NAME")
     pk.add_argument("-o", "--output", required=True, metavar="DIR", help="a new or empty directory")
     pk.add_argument("--policy", metavar="DIR", help="include the policy text that applied in this period")
+    pk.add_argument("--questions", metavar="DIR", help="include the question sets the decisions were made by answering")
     pk.add_argument("--correct-when", metavar="CEL", help="add a calibration section; which outcomes vindicate a decision")
     pk.add_argument("--answer", metavar="NAME", help="which answer carries the confidence")
     pk.add_argument("--by", metavar="DIM", help="break the curve down by class, question_set, route or inputs.<field>")
     pk.add_argument("--where", metavar="CEL", help="restrict the curve to these decisions, e.g. \"decision.route == 'auto'\"")
     pk.add_argument("--title", metavar="TEXT", help="heading for the front page")
     pk.set_defaults(func=_cmd_pack)
+
+    qs = sub.add_parser("questions", help="question sets: the questions a decision was made by answering, versioned")
+    qs_sub = qs.add_subparsers(dest="questions_command")
+    qs.set_defaults(func=lambda _args: (qs.print_help(), 2)[1])
+    ql = qs_sub.add_parser("lint", help="check every version bump is big enough for the change it carries")
+    ql.add_argument("registry", metavar="DIR", help="directory of question set files")
+    ql.add_argument("--json", action="store_true", help="print the report as JSON")
+    ql.set_defaults(func=_cmd_questions_lint)
+    qd = qs_sub.add_parser("diff", help="what changed between two versions, and whether the bump was sufficient")
+    qd.add_argument("registry", metavar="DIR")
+    qd.add_argument("before", metavar="ID@VERSION")
+    qd.add_argument("after", metavar="VERSION", help="or ID@VERSION")
+    qd.add_argument("--json", action="store_true")
+    qd.set_defaults(func=_cmd_questions_diff)
+    qsh = qs_sub.add_parser("show", help="print one version as JSON, the form it takes in an evidence pack")
+    qsh.add_argument("registry", metavar="DIR")
+    qsh.add_argument("ref", metavar="ID[@VERSION]", help="defaults to the latest version of that set")
+    qsh.set_defaults(func=_cmd_questions_show)
 
     im = sub.add_parser("import", help="reconstruct decision records from OpenTelemetry trace exports")
     im.add_argument("files", nargs="+", metavar="FILE", help="OTLP JSON / JSONL or Python SDK console-exporter JSON")

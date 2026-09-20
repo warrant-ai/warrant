@@ -227,6 +227,72 @@ What counts as *right* is never inferred. You state it as a CEL expression over 
 
 `--max-ece` and `--max-mce` turn it into a CI gate, and `--report FILE` writes JSON. Predicates need the `policy` extra (`pip install "warrantai[policy]"`).
 
+## Question sets: what was asked, versioned
+
+A decision model answers preset typed questions. Silently editing one of them invalidates every
+historical comparison that depended on it — the reliability curve you showed a validation committee
+last quarter was measured against wording that no longer exists, and nothing in the record would say
+so. So question sets are versioned files in your repository, and the version is stamped into every
+record.
+
+```yaml
+# question-sets/aml.alert@3.1.0.yaml
+id: aml.alert
+version: "3.1.0"
+owner: fiu-ops@bank.example
+questions:
+  disposition:
+    primitive: choice
+    instructions: Should this alert be closed as unremarkable, or escalated for investigation?
+    criteria: [close, escalate]
+  structuring_pattern:
+    primitive: noul
+    instructions: Is there a pattern of transactions structured below the reporting threshold?
+```
+
+Several versions live side by side, which is what makes a change reviewable:
+
+```
+warrant questions lint ./question-sets
+warrant questions diff ./question-sets aml.alert@3.0.0 3.1.0
+warrant questions show ./question-sets aml.alert
+```
+
+`lint` walks every consecutive pair of versions, classifies what moved, and **fails when the bump
+was too small for the change it carries**. That is the CI gate:
+
+```
+$ warrant questions lint ./question-sets
+1 question set(s), 2 version(s)
+  aml.alert: 3.1.0, 3.1.1
+  aml.alert@3.1.0 -> aml.alert@3.1.1
+    [breaking] structuring_pattern: question removed
+    breaking change; needs a major bump, got patch (INSUFFICIENT)
+  1 problem(s):
+    ... is a breaking change carried by a patch bump; needs major
+```
+
+A question removed, a primitive changed, or permitted answers narrowed is **breaking** — records
+written under the old version can no longer be interpreted. Editing the instructions is
+**semantic**: nothing breaks structurally, but the model is being asked a different thing, so the
+answers are no longer comparable with the ones before. That is the change most likely to be made
+carelessly, and the reason this exists.
+
+Give the registry to the adapter and the pin becomes enforceable — an unregistered set cannot run,
+and an answer outside the permitted values is caught where it happened rather than as a distortion
+in a curve months later:
+
+```python
+from warrant.questions import Registry
+
+adapter = DecisionAdapter(w, model, registry=Registry.load("./question-sets"))
+```
+
+`warrant pack --questions ./question-sets` then carries the sets the records actually cite into the
+evidence pack, so a reader who sees `aml.alert@3.1.0` on a record can read the questions behind it
+rather than an opaque token. A cited version the registry no longer holds stops the pack: a record
+whose questions cannot be produced is a record nobody can interpret.
+
 ## Pack: the artefact a committee reads
 
 Everything above produces evidence. This assembles it into something you can hand to internal audit,

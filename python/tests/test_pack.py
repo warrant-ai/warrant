@@ -1,6 +1,7 @@
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -207,3 +208,35 @@ def test_cli_pack_end_to_end(tmp_path):
         cwd=out, capture_output=True, text=True,
     )
     assert verified.returncode == 0 and "chain OK" in verified.stdout
+
+
+# --- question sets in the pack ----------------------------------------------
+
+
+QUESTIONS_DIR = Path(__file__).resolve().parents[2] / "examples" / "gallery" / "aml" / "question-sets"
+
+
+def test_the_pack_carries_the_questions_the_records_cite(tmp_path, store):
+    pytest.importorskip("yaml")
+    result = build_pack(store, tmp_path / "pack", stream="aml", questions_dir=QUESTIONS_DIR)
+    assert "questions/aml.alert@3.1.0.json" in result.files
+
+    payload = json.loads((tmp_path / "pack" / "questions" / "aml.alert@3.1.0.json").read_text())
+    assert payload["questions"]["disposition"]["criteria"] == ["close", "escalate"]
+    # an auditor reading a record's version stamp can now see what was actually asked
+    assert "`questions/aml.alert@3.1.0.json`" in (tmp_path / "pack" / "README.md").read_text()
+
+
+def test_a_cited_version_the_registry_no_longer_holds_stops_the_pack(tmp_path, store):
+    """A record whose questions cannot be produced is a record nobody can interpret."""
+    pytest.importorskip("yaml")
+    empty = tmp_path / "other-registry"
+    empty.mkdir()
+    (empty / "other.yaml").write_text(
+        "id: kyc.review\nversion: '1.0.0'\nquestions:\n  a:\n    primitive: noul\n    instructions: x\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(PackError) as exc:
+        build_pack(store, tmp_path / "pack", stream="aml", questions_dir=empty)
+    assert "aml.alert@3.1.0" in str(exc.value) and "cannot be shown" in str(exc.value)
+    assert not (tmp_path / "pack").exists()

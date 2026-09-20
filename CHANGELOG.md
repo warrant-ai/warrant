@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Question sets as versioned artefacts (`warrant.questions`, `warrant questions lint|diff|show`). A registry is a directory of YAML or JSON files, several versions of a set side by side, and the version is already stamped on every record by `decision.question_set`. `lint` walks each consecutive pair, classifies what moved and **fails when the version bump was too small for the change** — a question removed, a primitive changed or permitted answers narrowed is breaking; editing the instructions is semantic, because the model is being asked a different thing and the answers stop being comparable even though nothing breaks structurally
+- `DecisionAdapter(..., registry=...)` makes the pin enforceable: an unregistered or unpinned set cannot run, and the model's answers are checked against the questions that were asked, so an answer outside the permitted values is caught where it happened instead of surfacing as a distortion in a reliability curve
+- `warrant pack --questions DIR` carries the sets the records actually cite into the pack, resolved before anything is written; a cited version the registry no longer holds stops the pack rather than producing one whose decisions cannot be interpreted
+- The AML gallery gains `question-sets/aml.alert@3.1.0.yaml`, and the platform example loads it — with a real key, the questions Jev is asked are built from the registry, so the text asked and the text stamped on the record are the same by construction
+
+
 ## 0.4.0 (2026-09-20)
 
 The other half of the ledger. A decision record without an outcome is a log: this release attaches what actually happened, measures whether the stated confidence held on your own decisions, and assembles the result into something a model validation committee will read. Plus the boundary a decision model crosses, with TypeSafe's Jev as its first implementation, and the three layers composed into a worked example that runs on one machine.

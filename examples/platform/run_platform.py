@@ -38,6 +38,8 @@ import alert_workflow as app  # noqa: E402
 
 HERE = Path(__file__).parent
 POLICIES = HERE.parent / "gallery" / "aml" / "policies"
+QUESTION_SETS = HERE.parent / "gallery" / "aml" / "question-sets"
+QUESTION_SET = ("aml.alert", "3.1.0")
 SEGMENTS = ("retail", "retail", "retail", "sme", "sme", "trade_finance", "pep")
 JEV_MODEL = os.environ.get("JEV_MODEL", "jev-1.13.0")
 
@@ -66,12 +68,31 @@ class ScriptedModel(DecisionModel):
         confidence = round(min(0.98, max(0.05, score)), 2)
         close = confidence >= 0.5 and not state["structuring_pattern"]
         value = "close" if close else "escalate"
+        # Every question in aml.alert@3.1.0 gets an answer. The registry refuses a partial set,
+        # which is the point: a record that answered four of six questions is not comparable with
+        # one that answered all six, and nothing downstream would notice.
         return ModelResult(
             answers={
+                "profile_consistent": ModelAnswer(
+                    "profile_consistent", bool(state["profile_consistent"]), 0.86,
+                    {True: 0.86, False: 0.14} if state["profile_consistent"] else {True: 0.14, False: 0.86},
+                ),
+                "structuring_pattern": ModelAnswer(
+                    "structuring_pattern", bool(state["structuring_pattern"]), 0.81,
+                ),
+                "counterparty_risk": ModelAnswer(
+                    "counterparty_risk", round(state["counterparty_risk"] * 3, 2), 0.74,
+                ),
+                "explanation_on_file": ModelAnswer(
+                    "explanation_on_file", bool(state["explanation_on_file"]), 0.90,
+                ),
+                "behaviour_change": ModelAnswer(
+                    "behaviour_change", round(state["behaviour_change"] * 3, 2), 0.69,
+                ),
                 "disposition": ModelAnswer(
                     "disposition", value, confidence,
                     {value: confidence, "escalate" if close else "close": round(1 - confidence, 2)},
-                )
+                ),
             },
             model="scripted-1",
             tokens_in=1800,
@@ -136,8 +157,12 @@ async def main(alerts: int, store_path: Path) -> None:
         agent=AgentInfo("alert-adjudicator", "1.4.0"),
         policy_bundle=POLICIES, currency="INR", flush_interval=0.02,
     )
+    from warrant.questions import Registry
+
     app.wire(
-        adapter=DecisionAdapter(client, model),
+        # The registry makes the pinned version enforceable: an unregistered set cannot run, and
+        # an answer outside the permitted values is caught here rather than in a curve months on.
+        adapter=DecisionAdapter(client, model, registry=Registry.load(QUESTION_SETS)),
         client=client,
         questions=build_questions(live),
         outcome_source=lambda alert_id: outcomes.get(alert_id, ""),
@@ -191,17 +216,21 @@ def build_questions(live: bool) -> dict:
     """The six-question set. Real Jev question objects when a key is configured."""
     if not live:
         return {"disposition": object()}
-    from typesafe_sdk import Choice
+    from typesafe_sdk import Choice, Noul, Score
+    from warrant.questions import Registry
 
-    return {
-        "disposition": Choice(
-            instructions=(
-                "Given this transaction monitoring alert's derived features, should the alert be "
-                "closed as unremarkable, or escalated for investigation?"
-            ),
-            criteria={"close": None, "escalate": None},
-        )
-    }
+    # Built from the registry, so the questions Jev is asked and the questions stamped on the
+    # record are the same text by construction rather than by someone keeping two files in step.
+    question_set = Registry.load(QUESTION_SETS).get(*QUESTION_SET)
+    built = {}
+    for name, q in question_set.questions.items():
+        if q.primitive == "noul":
+            built[name] = Noul(instructions=q.instructions)
+        elif q.primitive == "choice":
+            built[name] = Choice(instructions=q.instructions, criteria={c: None for c in q.criteria})
+        else:
+            built[name] = Score(instructions=q.instructions, criteria=list(q.criteria))
+    return built
 
 
 def report(store_path: Path) -> None:
@@ -229,7 +258,7 @@ def report(store_path: Path) -> None:
     store = SQLiteStore(store_path, read_only=True)
     try:
         result = build_pack(
-            store, pack_dir, stream="aml", policy_dir=POLICIES,
+            store, pack_dir, stream="aml", policy_dir=POLICIES, questions_dir=QUESTION_SETS,
             correct_when="outcome.label == 'stayed_closed'",
             where="decision.route == 'auto'", answer="disposition",
             title="Alert adjudication: evidence pack",

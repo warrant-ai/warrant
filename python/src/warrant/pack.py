@@ -126,6 +126,7 @@ def _front_page(
     calibration: Optional[Any],
     title: Optional[str],
     policies_copied: List[str],
+    questions_written: Optional[List[str]] = None,
 ) -> str:
     name = title or f"Decision evidence pack — {manifest.stream or 'all streams'}"
     span = (
@@ -261,6 +262,10 @@ def _front_page(
         lines.append("| `calibration.json` | The reliability curve and its inputs, machine-readable |")
     for name_ in policies_copied:
         lines.append(f"| `policies/{name_}` | Policy text as it applied in this period |")
+    for name_ in questions_written or []:
+        lines.append(
+            f"| `questions/{name_}` | The questions these decisions were made by answering, at that version |"
+        )
     lines.append("")
     return "\n".join(lines)
 
@@ -298,6 +303,7 @@ def build_pack(
     *,
     stream: Optional[str] = None,
     policy_dir: Optional[Path] = None,
+    questions_dir: Optional[Path] = None,
     correct_when: Optional[str] = None,
     answer: Optional[str] = None,
     by: Optional[str] = None,
@@ -331,6 +337,11 @@ def build_pack(
     manifest.verified = True
     cover = coverage(store, stream=stream)
 
+    # Resolved before a single byte is written, for the same reason the chain is verified first:
+    # a half-built pack on disk is worse than none, and a cited version the registry cannot produce
+    # means the questions behind those decisions are unrecoverable.
+    question_payloads = _resolve_questions(questions_dir, manifest) if questions_dir else {}
+
     calibration = None
     if correct_when:
         from warrant.calibrate import calibrate
@@ -361,9 +372,19 @@ def build_pack(
 
     policies_copied = _copy_policies(policy_dir, directory) if policy_dir else []
     written.extend(f"policies/{name}" for name in policies_copied)
+    questions_written: List[str] = []
+    if question_payloads:
+        (directory / "questions").mkdir(parents=True, exist_ok=True)
+        for name, payload in sorted(question_payloads.items()):
+            (directory / "questions" / name).write_text(
+                json.dumps(payload, indent=2) + "\n", encoding="utf-8"
+            )
+            questions_written.append(name)
+    written.extend(f"questions/{name}" for name in questions_written)
 
     (directory / "README.md").write_text(
-        _front_page(manifest, cover, calibration, title, policies_copied), encoding="utf-8"
+        _front_page(manifest, cover, calibration, title, policies_copied, questions_written),
+        encoding="utf-8",
     )
     written.append("README.md")
 
@@ -391,3 +412,31 @@ def _copy_policies(policy_dir: Path, directory: Path) -> List[str]:
     for path in targets:
         shutil.copy2(path, directory / "policies" / path.name)
     return [p.name for p in targets]
+
+
+def _resolve_questions(questions_dir: Path, manifest: Manifest) -> Dict[str, Dict[str, Any]]:
+    """The question sets the records actually cite, resolved and ready to write.
+
+    Only the versions stamped on records in this period are included: a pack is evidence about
+    these decisions, not a dump of every set the customer has ever written. A version a record
+    cites but the registry no longer holds raises rather than being skipped — a record whose
+    questions cannot be produced is a record nobody can interpret.
+    """
+    from warrant.questions import QuestionSetError, Registry
+
+    try:
+        registry = Registry.load(questions_dir)
+    except (FileNotFoundError, QuestionSetError) as exc:
+        raise PackError(str(exc)) from exc
+    payloads: Dict[str, Dict[str, Any]] = {}
+    for ref in sorted(manifest.question_sets):
+        set_id, _, version = ref.partition("@")
+        try:
+            question_set = registry.get(set_id, version)
+        except QuestionSetError as exc:
+            raise PackError(
+                f"records in this period cite {ref}, which the registry does not hold, so the "
+                f"questions behind those decisions cannot be shown: {exc}"
+            ) from exc
+        payloads[f"{set_id}@{version}.json"] = question_set.to_dict()
+    return payloads
