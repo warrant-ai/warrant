@@ -72,7 +72,15 @@ def _every_activity(activity_type: str) -> bool:
 
 
 class WarrantInterceptor(Interceptor):
-    """Gates and records the activities named in ``decisions``; collects the others as evidence."""
+    """Gates and records the activities named in ``decisions``; collects the others as evidence.
+
+    ``workflow_only=True`` is the one case where an empty ``decisions`` mapping is correct: the
+    interceptor gates nothing and exists for the workflow-side helpers — the ``warrant.record``
+    local activity and the approval header. That is the shape when decisions are recorded by a
+    model adapter inside an activity (see :mod:`warrant.adapters.model`), where also naming the
+    activity here would record the same decision twice. Evidence collection is off in that mode,
+    since there is no decision on this side for evidence to attach to.
+    """
 
     def __init__(
         self,
@@ -82,14 +90,21 @@ class WarrantInterceptor(Interceptor):
         evidence: Callable[[str], bool] = _every_activity,
         pricer: Optional[Pricer] = None,
         max_runs: int = 1000,
+        workflow_only: bool = False,
     ) -> None:
-        if not decisions:
-            raise ValueError("decisions is empty: name at least one activity type whose runs are decisions")
+        if not decisions and not workflow_only:
+            raise ValueError(
+                "decisions is empty: name at least one activity type whose runs are decisions, or "
+                "pass workflow_only=True if this interceptor is here only for the workflow-side "
+                "record activity and a model adapter records the decisions"
+            )
+        if decisions and workflow_only:
+            raise ValueError("workflow_only=True gates nothing, so decisions must be empty")
         if max_runs < 1:
             raise ValueError("max_runs must be at least 1")
         self._client = client
         self._decisions = dict(decisions)
-        self._is_evidence = evidence
+        self._is_evidence = (lambda _activity_type: False) if workflow_only else evidence
         self._pricer = pricer
         # Evidence is kept per workflow run; a run can end without a decision and nothing tells
         # the worker, so the log forgets the oldest runs past max_runs.

@@ -140,20 +140,33 @@ async def approved(activity: Any, arg: Any = _unset, *, args: Sequence[Any] = ()
     return await handle
 
 
-async def rejected(record_id: str, *, reviewer: str, note: Optional[str] = None) -> Dict[str, Any]:
-    """Record that a person rejected an escalated decision, or that the wait for one timed out."""
+async def verdict(record_id: str, *, reviewer: str, verdict: str, note: Optional[str] = None) -> Dict[str, Any]:
+    """Record a person's verdict on a decision that was routed to them, as a linked record.
+
+    Use this when the decision was already written — by ``decide()`` or by a model adapter — and a
+    reviewer then approved, rejected or amended it. The reviewer's name comes from the
+    application's own signal or update; Warrant records who it was told, and never authenticates
+    them. That is the application's job, or the console's.
+    """
     _require_text(reviewer, "reviewer")
+    if verdict not in ("approve", "reject", "amend"):
+        raise ValueError("verdict must be approve, reject or amend")
     if not isinstance(record_id, str) or not ULID_RE.match(record_id):
-        raise ValueError("record_id must be the escalated decision's record id")
+        raise ValueError("record_id must be the decision's record id")
     request = {
         "kind": "verdict",
         "record_id": _record_id("verdict"),
         "decision_record_id": record_id,
         "reviewer": reviewer,
-        "verdict": "reject",
+        "verdict": verdict,
         "note": note,
     }
     return await workflow.execute_local_activity(RECORD_ACTIVITY, request, start_to_close_timeout=_RECORD_TIMEOUT, retry_policy=_RECORD_RETRY)
+
+
+async def rejected(record_id: str, *, reviewer: str, note: Optional[str] = None) -> Dict[str, Any]:
+    """Record that a person rejected an escalated decision, or that the wait for one timed out."""
+    return await verdict(record_id, reviewer=reviewer, verdict="reject", note=note)
 
 
 class WarrantWorkflowInbound(WorkflowInboundInterceptor):
