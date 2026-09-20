@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Golden-set drift detection, as three more gates on `warrant test` rather than a new subsystem: `model-drift`, `answer-drift` and `confidence-drift`. A fixed set of real decisions replayed daily against the version you pinned catches a hosted model that changed underneath you — and catches it when **nothing flipped**, which is exactly when no other signal fires and every calibration threshold tuned against the old confidences is silently wrong
+- `model-drift` means the model changed **without the target asking for it**. Replaying against a target that names a different model is the ordinary use of replay and is not drift; a pinned version serving something else is the finding, and is the check on a vendor's promise that pinned versions are immutable
+- `--confidence-tolerance` (default 0.01) separates float noise from a real move. A pinned model should not move at all
+- The `--fail-on` help now lists the gates from the constant, so it cannot fall out of step again
+
 - Question sets as versioned artefacts (`warrant.questions`, `warrant questions lint|diff|show`). A registry is a directory of YAML or JSON files, several versions of a set side by side, and the version is already stamped on every record by `decision.question_set`. `lint` walks each consecutive pair, classifies what moved and **fails when the version bump was too small for the change** — a question removed, a primitive changed or permitted answers narrowed is breaking; editing the instructions is semantic, because the model is being asked a different thing and the answers stop being comparable even though nothing breaks structurally
 - `DecisionAdapter(..., registry=...)` makes the pin enforceable: an unregistered or unpinned set cannot run, and the model's answers are checked against the questions that were asked, so an answer outside the permitted values is caught where it happened instead of surfacing as a distortion in a reliability curve
 - `warrant pack --questions DIR` carries the sets the records actually cite into the pack, resolved before anything is written; a cited version the registry no longer holds stops the pack rather than producing one whose decisions cannot be interpreted

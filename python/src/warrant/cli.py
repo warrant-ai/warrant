@@ -672,7 +672,11 @@ def build_parser() -> argparse.ArgumentParser:
     te.add_argument("--against", required=True, metavar="TARGET")
     te.add_argument("--mode", choices=["frozen", "live"], default="frozen")
     te.add_argument("--decider", metavar="MODULE:FUNCTION", help="overrides the target's decider")
-    te.add_argument("--fail-on", metavar="GATES", help="comma list of flipped,new-deny,new-escalate,unreplayable,errored")
+    from warrant.replay import GATES as _GATES
+
+    te.add_argument("--fail-on", metavar="GATES", help="comma list of " + ",".join(_GATES))
+    te.add_argument("--confidence-tolerance", type=float, default=0.01, metavar="X",
+                    help="a confidence move smaller than this is noise (default 0.01); a pinned model should not move at all")
     te.add_argument("--max-cost-increase", metavar="PCT", help="e.g. 10%%")
     te.add_argument("--concurrency", type=int, default=1)
     te.add_argument("--json", metavar="FILE", help="write a JSON report")

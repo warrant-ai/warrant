@@ -209,7 +209,14 @@ def test_report_json_and_junit(recorded, tmp_path):
     ds = _set_from(recorded)
     report = replay(ds, Target("v2", AgentInfo("a", "2")), decide_v2, fail_on=["flipped"], max_cost_increase=-90)
     data = report.to_dict()
-    assert data["totals"] == {"replayed": 6, "flipped": 2, "new_deny": 0, "new_escalate": 0, "unreplayable": 0, "errored": 0, "cost_before": 12.0, "cost_after": 3.0, "cost_change_pct": -75.0}
+    # model_drift is 6 on purpose: this target names no model, so decide_v2 falls back to haiku
+    # and every decision was answered by a model the target never asked for. That is exactly the
+    # signal a golden run watches for, and it is a real one here rather than fixture noise.
+    assert data["totals"] == {
+        "replayed": 6, "flipped": 2, "new_deny": 0, "new_escalate": 0, "unreplayable": 0, "errored": 0,
+        "answer_drift": 0, "confidence_drift": 0, "model_drift": 6,
+        "cost_before": 12.0, "cost_after": 3.0, "cost_change_pct": -75.0,
+    }
     assert data["gates"]["passed"] is False and len(data["gates"]["failures"]) == 2
     assert data["results"][2]["flipped"] is True and data["results"][2]["cost_delta"] == -1.5 and "after_record" not in data["results"][2]
     json.dumps(data)
@@ -296,3 +303,103 @@ def test_cli_end_to_end(recorded, tmp_path, capsys, monkeypatch):
     assert main(["--workspace", ws, "set", "create", "x", "--store", str(tmp_path / "missing.db"), "--from-stream", "lending"]) == 1
     assert main(["--workspace", ws, "target", "add", "bad", "--agent", "noversion"]) == 2
     assert main(["set"]) == 2 and main(["target"]) == 2
+
+
+# --- golden-set drift --------------------------------------------------------
+#
+# A golden set is a fixed set of decisions replayed against the version you pinned. Finding drift
+# there means the version served today is not the version served when the records were written,
+# and every reliability curve measured against it describes a model that no longer exists.
+
+
+from collections import Counter  # noqa: E402
+
+from warrant.replay import AnswerDrift, ReplayResult, compare_answers  # noqa: E402
+
+
+def _record_with(answers, model="typesafe/jev-1.13.0"):
+    return {
+        "record_id": "01K5A3Q7Z2XV8M9N4B6C1D0E01",
+        "decision": {"class": "aml.alert.disposition", "subject": "alert:1", "action": "close", "answers": answers},
+        "evidence": [{"name": "m", "type": "model_call", "uri": f"model://{model}", "content_hash": "a" * 64}],
+    }
+
+
+def test_identical_answers_are_no_drift():
+    answers = [{"question": "disposition", "value": "close", "confidence": 0.94}]
+    assert compare_answers(_record_with(answers), _record_with(list(answers))) == []
+
+
+def test_a_changed_answer_value_is_drift():
+    before = _record_with([{"question": "disposition", "value": "close", "confidence": 0.94}])
+    after = _record_with([{"question": "disposition", "value": "escalate", "confidence": 0.94}])
+    (drift,) = compare_answers(before, after)
+    assert drift.value_changed and str(drift) == "disposition: 'close' -> 'escalate'"
+
+
+def test_a_moved_confidence_is_drift_even_when_the_answer_is_the_same():
+    """The quiet one: nothing flips, and every threshold tuned against the old numbers is wrong."""
+    before = _record_with([{"question": "disposition", "value": "close", "confidence": 0.94}])
+    after = _record_with([{"question": "disposition", "value": "close", "confidence": 0.97}])
+    (drift,) = compare_answers(before, after)
+    assert not drift.value_changed
+    assert drift.confidence_delta == pytest.approx(0.03)
+    assert "confidence 0.94 -> 0.97 (+0.030)" in str(drift)
+
+
+def test_a_question_that_stopped_being_answered_is_drift():
+    before = _record_with([
+        {"question": "disposition", "value": "close", "confidence": 0.9},
+        {"question": "structuring_pattern", "value": False, "confidence": 0.8},
+    ])
+    after = _record_with([{"question": "disposition", "value": "close", "confidence": 0.9}])
+    (drift,) = compare_answers(before, after)
+    assert drift.question == "structuring_pattern" and drift.after_value is None
+
+
+def test_confidence_tolerance_separates_noise_from_signal():
+    small = AnswerDrift("q", "close", "close", 0.940, 0.945)
+    large = AnswerDrift("q", "close", "close", 0.940, 0.970)
+    result = ReplayResult(
+        record_id="r", subject="s", decision_class="c", status="replayed",
+        before_action="close", after_action="close", before_mandate="allow", after_mandate="allow",
+        before_cost=0.0, after_cost=0.0, outcome_label=None,
+        drift=[small, large], confidence_tolerance=0.01,
+    )
+    assert result.confidence_drift == [large]  # 0.005 is below tolerance, 0.03 is above
+    assert result.answer_drift == []
+
+
+def test_replaying_against_the_same_model_reports_no_model_drift(recorded):
+    """Ordinary replay against a target that asks for a different model is not drift."""
+    ds = _set_from(recorded)
+    target = Target("v2", AgentInfo("a", "2"), model="anthropic/claude-haiku-4-5-20251001")
+    report = replay(ds, target, decide_v2)
+    assert report.model_drifted == []  # the target asked for haiku and got haiku
+
+
+def test_a_model_the_target_never_asked_for_is_drift(recorded):
+    ds = _set_from(recorded)
+    report = replay(ds, Target("v2", AgentInfo("a", "2")), decide_v2)  # no model named
+    assert len(report.model_drifted) == 6
+    assert report.model_transitions() == Counter(
+        {"anthropic/claude-sonnet-5 -> anthropic/claude-haiku-4-5-20251001": 6}
+    )
+    assert "served by a different model" in report.summary()
+
+
+def test_the_drift_gates_fail_a_run(recorded):
+    ds = _set_from(recorded)
+    report = replay(ds, Target("v2", AgentInfo("a", "2")), decide_v2, fail_on=["model-drift"])
+    assert not report.passed
+    assert report.failures() == ["6 decision(s) served by a different model"]
+
+    clean = replay(ds, Target("v2", AgentInfo("a", "2"), model="anthropic/claude-haiku-4-5-20251001"),
+                   decide_v2, fail_on=["model-drift", "answer-drift", "confidence-drift"])
+    assert clean.passed
+
+
+def test_an_unknown_gate_is_refused(recorded):
+    with pytest.raises(ValueError) as exc:
+        replay(_set_from(recorded), Target("v", AgentInfo("a", "1")), decide_v1, fail_on=["vibes"])
+    assert "unknown fail-on gate" in str(exc.value)

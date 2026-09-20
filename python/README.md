@@ -227,6 +227,43 @@ What counts as *right* is never inferred. You state it as a CEL expression over 
 
 `--max-ece` and `--max-mce` turn it into a CI gate, and `--report FILE` writes JSON. Predicates need the `policy` extra (`pip install "warrantai[policy]"`).
 
+## Golden sets: catching a model that changed underneath you
+
+A hosted model is updated without your consent. If the update moves confidences without changing
+any decision, **nothing flips** — no policy result changes, no alert fires — and every calibration
+threshold you tuned against the old numbers is quietly wrong. The reliability curve you showed a
+validation committee last quarter describes a model that no longer exists.
+
+A golden set is a fixed set of real decisions replayed against the version you pinned, every day:
+
+```
+warrant test golden --against jev-pinned \
+  --fail-on answer-drift,confidence-drift,model-drift --junit golden.xml
+```
+
+```
+# 20 decisions replayed (frozen) against jev-pinned
+# 0 flipped
+# 17 served by a different model (17 typesafe/jev-1.13.0 -> typesafe/jev-1.13.1)
+# 17 confidence(s) moved, worst disposition: confidence 0.9 -> 0.935 (+0.035)
+# FAILED: 17 decision(s) whose confidence moved; 17 decision(s) served by a different model
+```
+
+Zero flipped, and it still fails. That is the whole point.
+
+Three signals, each its own gate:
+
+| Gate | What it catches |
+|---|---|
+| `model-drift` | The model identifier on the record changed **without the target asking for it**. Replaying against a target that names a different model is ordinary replay, not drift — you asked for that. A pinned version serving something else is the finding |
+| `answer-drift` | A typed answer's value changed, or a question stopped being answered |
+| `confidence-drift` | A confidence moved past `--confidence-tolerance` (default 0.01) while the value stayed the same. The quiet one |
+
+This is not a subsystem — it is `warrant test` with three more gates, so a golden set is just a
+decision set, a pinned target and a cron entry, and it emits the same JUnit any CI runner reads.
+
+A vendor that promises immutable pinned versions is making a claim you can check. This is how.
+
 ## Question sets: what was asked, versioned
 
 A decision model answers preset typed questions. Silently editing one of them invalidates every
