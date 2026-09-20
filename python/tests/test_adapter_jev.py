@@ -24,6 +24,9 @@ typesafe_sdk = pytest.importorskip("typesafe_sdk", reason="the Jev adapter needs
 
 # --- stubs ------------------------------------------------------------------
 
+#: Lets a fake distinguish "not given" from an explicitly empty distribution.
+_DEFAULT = object()
+
 
 class _StubClient:
     """Stands in for TypeSafeClient. Records the call and returns a prepared response."""
@@ -48,12 +51,17 @@ def _response(answers, *, model="jev-1.13.0", tokens_in=1800, tokens_out=0):
     )
 
 
-def _choice(value="close", confidence=0.94, probabilities=None):
+def _choice(value="close", confidence=0.88, probabilities=_DEFAULT):
+    # Jev's `confidence` is the margin between the top two probabilities, so it is deliberately
+    # NOT equal to p(chosen) here. An earlier fake set the two to the same number, which is exactly
+    # why the adapter recording the margin as a confidence went unnoticed until a live call.
+    if probabilities is _DEFAULT:
+        probabilities = {"close": 0.94, "escalate": 0.06}
     return typesafe_sdk.ChoiceAnswer(
         type="choice",
         choice=value,
         confidence=confidence,
-        probabilities=probabilities or {"close": 0.94, "escalate": 0.06},
+        probabilities=probabilities,
     )
 
 
@@ -102,14 +110,35 @@ def _decisions(client):
 
 def test_a_choice_keeps_its_distribution_not_only_the_winner():
     answer = normalise_answer("disposition", _choice())
-    assert answer.value == "close" and answer.confidence == 0.94
+    assert answer.value == "close"
     assert answer.distribution == {"close": 0.94, "escalate": 0.06}
 
 
-def test_a_score_keeps_the_rubric_distribution():
+def test_a_choice_states_the_probability_of_its_value_not_the_vendors_margin():
+    # The record's `confidence` is read as "the stated probability that `value` is right" by every
+    # reliability curve and every confidence floor in a policy. Jev's own field is the margin
+    # between the top two probabilities (0.94 - 0.06), which is a smaller, different quantity.
+    answer = normalise_answer("disposition", _choice(confidence=0.88))
+    assert answer.confidence == 0.94
+
+
+def test_a_choice_falls_back_to_the_vendors_number_only_when_there_is_no_distribution():
+    answer = normalise_answer("disposition", _choice(confidence=0.71, probabilities={}))
+    assert answer.confidence == 0.71
+
+
+def test_a_score_keeps_the_rubric_distribution_and_states_no_confidence():
+    # A score is the mean of the bucket distribution, so it is an expectation rather than a value
+    # an outcome can equal. There is no probability that 0.18 is "right", so none is stated and
+    # calibration leaves scores out rather than curving against a number that is not a probability.
     answer = normalise_answer("counterparty_risk", _score())
-    assert answer.value == 0.18 and answer.confidence == 0.74
+    assert answer.value == 0.18
+    assert answer.confidence is None
     assert answer.distribution == {0: 0.8, 1: 0.2}
+
+
+def test_a_score_carries_no_confidence_onto_the_record():
+    assert "confidence" not in normalise_answer("counterparty_risk", _score()).as_record_answer()
 
 
 @pytest.mark.parametrize(

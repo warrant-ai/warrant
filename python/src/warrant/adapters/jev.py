@@ -20,6 +20,12 @@ refuses to send rather than discovering the problem in an audit.
 
 **No Jev vocabulary reaches the record schema.** Nouls, choices and scores are normalised to a
 value, a confidence and a distribution before anything is written. See :mod:`warrant.adapters.base`.
+
+**A field called confidence is not necessarily a confidence.** Jev's ``confidence`` is a margin
+between the top two probabilities, not the probability of the value it chose, and a Score's is
+neither. Warrant's ``confidence`` means the stated probability that ``value`` is right, because
+that is what calibration and every confidence floor in a policy read it as. :func:`normalise_answer`
+produces that quantity from the distribution, or leaves it out.
 """
 
 from __future__ import annotations
@@ -66,10 +72,30 @@ def _require_sdk():
 def normalise_answer(question: str, answer: Any) -> ModelAnswer:
     """Turn one Jev answer into the vendor-neutral shape, whichever primitive produced it.
 
-    A Noul carries no confidence of its own: it is a single probability where 0.5 means "no idea".
+    ``confidence`` on a Warrant record means one thing only: the stated probability that ``value``
+    is right. Every reliability curve, every ECE figure and every policy clause with a confidence
+    floor reads it that way. So an adapter's job here is not to copy the vendor's field of the same
+    name — it is to produce that quantity, or produce nothing.
+
+    Jev's own ``confidence`` is not that quantity. On a Choice it is the **margin** between the top
+    two probabilities: an answer with ``{escalate: 0.91, close: 0.09}`` reports ``0.82``, not the
+    0.91 the model actually claims. Passing it straight through understated the stated probability
+    by 0.238 on average over a live set of 60, and put a margin on the x-axis of a curve whose
+    x-axis is a probability. The probability is right there in ``probabilities``, so a Choice takes
+    it from there and falls back to the vendor's number only if the distribution is missing.
+
+    A Noul carries no confidence field at all: it is a single probability where 0.5 means "no idea".
     That *is* a two-outcome distribution, so it becomes a boolean value, a confidence equal to the
     winning side's probability, and the distribution it always was. Doing anything else would make
     a yes/no question the one primitive calibration cannot measure.
+
+    A Score gets **no confidence**, deliberately. ``score`` is the mean of the bucket distribution
+    (``Σ i·pᵢ``) — an expectation like 1.82, which is not a value any outcome can later be equal to,
+    so "was it right?" has no answer without a bucketing rule the caller never stated. Inventing one
+    here would be the same mistake as inferring correctness. The value stays the expectation, which
+    is what a policy clause thresholds on; the bucket distribution rides along for a caller who
+    wants to derive a calibratable classification explicitly; and ``warrant calibrate`` leaves
+    scores out rather than drawing a curve against a number that is not a probability.
     """
     kind = getattr(answer, "type", None)
     if kind == "noul":
@@ -81,17 +107,19 @@ def normalise_answer(question: str, answer: Any) -> ModelAnswer:
             distribution={True: p_true, False: round(1.0 - p_true, 12)},
         )
     if kind == "choice":
+        distribution = {k: float(v) for k, v in (answer.probabilities or {}).items()}
+        p_chosen = distribution.get(answer.choice)
         return ModelAnswer(
             question=question,
             value=answer.choice,
-            confidence=float(answer.confidence),
-            distribution={k: float(v) for k, v in (answer.probabilities or {}).items()},
+            confidence=p_chosen if p_chosen is not None else float(answer.confidence),
+            distribution=distribution,
         )
     if kind == "score":
         return ModelAnswer(
             question=question,
             value=float(answer.score),
-            confidence=float(answer.confidence),
+            confidence=None,
             distribution={k: float(v) for k, v in (answer.probabilities or {}).items()},
         )
     raise ModelError(f"unknown answer primitive {kind!r} for question {question!r}")
