@@ -22,6 +22,7 @@ from warrant.schema import SCHEMA_VERSION, ValidationError, validate
 from warrant.store import SQLiteStore
 
 ROUTES = ("auto", "human", "model", "deferred")
+SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 
 log = logging.getLogger("warrant")
 
@@ -167,6 +168,8 @@ class Decision:
         self._inputs: Optional[Dict[str, Any]] = None
         self._answers: List[Dict[str, Any]] = []
         self._question_set: Optional[Dict[str, str]] = None
+        self._state_digest: Optional[str] = None
+        self._state_ref: Optional[str] = None
         self._route: Optional[str] = None
         self._blobs: Dict[str, Dict[str, Any]] = {}
         self._replay_source = replay_source
@@ -390,6 +393,21 @@ class Decision:
                 item["distribution"] = entries
         self._answers.append(item)
 
+    def state(self, *, digest: str, ref: Optional[str] = None) -> None:
+        """Record the hash of the exact state this decision was made on, and where the snapshot lives.
+
+        The chain proves the state was not altered; the snapshot allows replay. They are separate
+        on purpose: a snapshot carries its own retention and residency and can be redacted or
+        expired without breaking the chain.
+        """
+        self._assert_open()
+        if not isinstance(digest, str) or not SHA256_RE.match(digest):
+            raise ValueError("state digest must be a sha256 hex string")
+        if ref is not None and (not isinstance(ref, str) or not ref):
+            raise ValueError("state ref must be a non-empty string")
+        self._state_digest = digest
+        self._state_ref = ref
+
     def act(
         self,
         action: str,
@@ -493,6 +511,10 @@ class Decision:
             decision["route"] = self._route
         if self._question_set is not None:
             decision["question_set"] = self._question_set
+        if self._state_digest is not None:
+            decision["state_digest"] = self._state_digest
+        if self._state_ref is not None:
+            decision["state_ref"] = self._state_ref
         if self._answers:
             decision["answers"] = list(self._answers)
 
