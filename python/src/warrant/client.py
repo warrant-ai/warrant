@@ -1088,8 +1088,13 @@ class Warrant:
         shown: Optional[Sequence[str]] = None,
         reason: Optional[str] = None,
         record_id: Optional[str] = None,
+        decision: Optional[Mapping[str, Any]] = None,
     ) -> str:
         """Append a lifecycle transition for an earlier decision (ADR 3). History is never edited.
+
+        A client recording to a collector has no store to read the decision from: pass ``from_state``
+        and, to leave ``pending_evidence`` for ``warranted``, the sealed ``decision`` record itself, so
+        the rules can confirm only a person was missing.
 
         ``from_state`` is read from the store when one is local; a client recording to a collector
         must pass it. Leaving ``escalated`` for ``warranted`` needs a named ``reviewer`` and the
@@ -1103,7 +1108,8 @@ class Warrant:
             raise ValueError("decided_by must name who decided, e.g. human:a.rao or policy:CR-07@2026.4")
         if record_id is not None and not (isinstance(record_id, str) and ULID_RE.match(record_id)):
             raise ValueError(f"record_id must be a 26-character ULID, got {record_id!r}")
-        decision = None
+        if decision is not None and decision.get("record_id") != decision_record_id:
+            raise ValueError("decision is not the record named by decision_record_id")
         if self._store is not None:
             self._emitter.flush()
             decision = self._store.get(decision_record_id)
@@ -1138,6 +1144,8 @@ class Warrant:
                 raise ValueError(problem)
         elif to_state == "warranted" and from_state == "escalated" and human is None:
             raise ValueError("leaving escalated for warranted needs a named reviewer and the digests they were shown")
+        elif to_state == "warranted" and from_state == "pending_evidence":
+            raise ValueError("leaving pending_evidence for warranted needs the decision record (decision=), to confirm only a person was missing")
         return self._append_linked("transition", decision_record_id, section, record_id=record_id)
 
     def _resolve(self, subject: Optional[str], decision_record_id: Optional[str]) -> str:

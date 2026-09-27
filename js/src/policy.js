@@ -19,13 +19,16 @@
 
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { basename, extname, join } from "node:path";
-import { MANDATE_RESULTS, Verdict } from "./client.js";
+import { EVIDENCE_TYPES, MANDATE_RESULTS, Verdict } from "./client.js";
 
 export const FAIL_MODES = ["closed", "open", "escalate"];
 export const CLAUSE_RESULTS = ["allow", "deny", "escalate"];
 const CLASS_PATTERN = /^[a-z0-9_]+(\.[a-z0-9_]+)*(\.\*)?$/;
 const FAIL_RESULT = { closed: "deny", open: "allow", escalate: "escalate" };
 const POLICY_FILE = /\.(ya?ml|json)$/i;
+const OBLIGATION_KINDS = ["verifiable", "advisory"];
+const DURATION = /^\s*(\d+)\s*([smhd]?)\s*$/;
+const UNIT_SECONDS = { "": 1, s: 1, m: 60, h: 3600, d: 86400 };
 // An input compared directly with a decimal literal. A whole-number input (0, 1, 40) is an
 // int, and CEL engines disagree on int-versus-double comparison; double(x) is portable.
 const BARE_DECIMAL_COMPARISON = /(?<![\w.)])([a-z_][\w.]*)\s*(<=|>=|==|!=|<|>)\s*\d+\.\d+|\d+\.\d+\s*(<=|>=|==|!=|<|>)\s*([a-z_][\w.]*)(?![\w.(])/i;
@@ -64,6 +67,76 @@ export function lintClause(when) {
     warnings.push(`divides ${division[1]} by ${division[2]}; whole numbers divide as integers, write double(${division[1]}) / double(${division[2]})`);
   }
   return warnings;
+}
+
+/** `30d`, `12h`, `90m`, `45s` or a whole number of seconds, as in the Python SDK. */
+export function parseDuration(value, where) {
+  if (typeof value === "boolean") throw new PolicyError(`${where}: not a duration: ${JSON.stringify(value)}`);
+  if (typeof value === "number" && Number.isInteger(value)) {
+    if (value < 0) throw new PolicyError(`${where}: a duration cannot be negative`);
+    return value;
+  }
+  const match = DURATION.exec(String(value));
+  if (!match) throw new PolicyError(`${where}: not a duration (use e.g. 30d, 12h, 90m or seconds): ${JSON.stringify(value)}`);
+  return Number(match[1]) * UNIT_SECONDS[match[2]];
+}
+
+function parseObligations(name, raw, env, clauseIds) {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) throw new PolicyError(`${name}: 'obligations' must be a list`);
+  const seen = new Set();
+  return raw.map((ro, i) => {
+    let where = `${name}: obligation #${i + 1}`;
+    if (ro === null || typeof ro !== "object" || Array.isArray(ro)) throw new PolicyError(`${where} must be a mapping`);
+    const id = String(ro.id ?? "").trim();
+    if (!id) throw new PolicyError(`${where} has no id`);
+    if (seen.has(id)) throw new PolicyError(`${name}: duplicate obligation id ${JSON.stringify(id)}`);
+    seen.add(id);
+    where = `${name}: obligation ${id}`;
+    const requires = String(ro.requires ?? "");
+    if (!EVIDENCE_TYPES.includes(requires)) throw new PolicyError(`${where}: requires must be one of ${EVIDENCE_TYPES.join(", ")}, got ${JSON.stringify(requires)}`);
+    const kind = String(ro.kind ?? "verifiable");
+    if (!OBLIGATION_KINDS.includes(kind)) throw new PolicyError(`${where}: kind must be verifiable or advisory, got ${JSON.stringify(kind)}`);
+    const providers = ro.providers ?? [];
+    if (!Array.isArray(providers) || !providers.every((p) => typeof p === "string" && p)) throw new PolicyError(`${where}: providers must be a list of provider names`);
+    if (providers.includes("self")) throw new PolicyError(`${where}: 'self' cannot be a qualified provider; the acting agent never supplies evidence for its own obligation`);
+    const maxAge = ro.max_age !== undefined && ro.max_age !== null ? parseDuration(ro.max_age, `${where}: max_age`) : undefined;
+    const clause = ro.clause === undefined || ro.clause === null ? undefined : String(ro.clause);
+    if (clause !== undefined && !clauseIds.has(clause)) throw new PolicyError(`${where}: clause ${JSON.stringify(ro.clause)} is not a clause of this policy`);
+    let program;
+    if (ro.when !== undefined && ro.when !== null) {
+      if (typeof ro.when !== "string" || !ro.when.trim()) throw new PolicyError(`${where}: 'when' must be a CEL expression string`);
+      try {
+        program = env.parse(ro.when);
+      } catch (err) {
+        throw new PolicyError(`${where}: CEL parse error: ${String(err.message).split("\n")[0]}`, { cause: err });
+      }
+    }
+    return {
+      id, requires, kind, providers: [...providers], maxAgeSeconds: maxAge,
+      name: ro.name ? String(ro.name) : undefined, clause, title: ro.title ? String(ro.title) : undefined,
+      when: ro.when ? String(ro.when).trim() : undefined, program,
+    };
+  });
+}
+
+function parseRetention(name, raw) {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "object" || Array.isArray(raw) || typeof raw.class !== "string" || !raw.class) {
+    throw new PolicyError(`${name}: retention must be a mapping with a 'class' name`);
+  }
+  const out = { class: raw.class };
+  if (raw.period !== undefined && raw.period !== null) out.seconds = parseDuration(raw.period, `${name}: retention period`);
+  return out;
+}
+
+/** The obligation as it is written onto a record. */
+function obligationRecord(spec, policy) {
+  const out = { id: spec.id, requires: spec.requires, kind: spec.kind, policy_id: policy.policyId, policy_version: policy.version };
+  if (spec.providers.length) out.providers = [...spec.providers];
+  if (spec.maxAgeSeconds !== undefined) out.max_age_seconds = spec.maxAgeSeconds;
+  for (const key of ["name", "clause", "title"]) if (spec[key] !== undefined) out[key] = spec[key];
+  return out;
 }
 
 /** JSON numbers to CEL numbers, as the Python SDK maps them: whole numbers are ints, the rest doubles. */
@@ -131,7 +204,15 @@ function parsePolicy(name, raw, cel, logger) {
     return { name: String(rt.name || `test #${i + 1}`), inputs: { ...rt.inputs }, expect, clause: rt.clause === undefined || rt.clause === null ? undefined : String(rt.clause) };
   });
 
-  return { policyId, version, classes: classes.map((c) => c.trim()), clauses, failMode, default: fallback, title: raw.title ? String(raw.title) : undefined, tests, source: name };
+  const obligations = parseObligations(name, raw.obligations, env, new Set(clauses.map((c) => c.id)));
+  if (raw.enforce !== undefined && typeof raw.enforce !== "boolean") throw new PolicyError(`${name}: 'enforce' must be true or false`);
+  const retention = parseRetention(name, raw.retention);
+
+  return {
+    policyId, version, classes: classes.map((c) => c.trim()), clauses, failMode, default: fallback,
+    title: raw.title ? String(raw.title) : undefined, tests, source: name,
+    obligations, enforce: raw.enforce === true, retention,
+  };
 }
 
 /** A set of policies with a lookup from decision class to the governing policy. */
@@ -219,15 +300,39 @@ export class CelPolicyEngine {
       }
       if (typeof matched !== "boolean") return this._fail(policy, `clause ${clause.id}: expression returned ${typeof matched}, not bool`);
       if (matched) {
-        return new Verdict(clause.result, { policyId: policy.policyId, policyVersion: policy.version, clause: clause.id, reason: clause.title ?? `clause ${clause.id} matched` });
+        return this._withAdr(policy, activation, { result: clause.result, policyId: policy.policyId, policyVersion: policy.version, clause: clause.id, reason: clause.title ?? `clause ${clause.id} matched` });
       }
     }
-    return new Verdict(policy.default, { policyId: policy.policyId, policyVersion: policy.version, reason: "no clause matched" });
+    return this._withAdr(policy, activation, { result: policy.default, policyId: policy.policyId, policyVersion: policy.version, reason: "no clause matched" });
+  }
+
+  /**
+   * Attach the obligations that apply, the enforcement mode and the retention class. An obligation
+   * whose `when` cannot be evaluated applies: more evidence is the only safe direction.
+   */
+  _withAdr(policy, activation, fields) {
+    const { result, ...rest } = fields;
+    if (!policy.obligations.length && !policy.enforce && policy.retention === undefined) return new Verdict(result, rest);
+    const obligations = [];
+    for (const spec of policy.obligations) {
+      if (spec.program !== undefined && activation !== null) {
+        let applies;
+        try {
+          applies = spec.program(activation);
+        } catch (err) {
+          this._log.warn(`warrant policy ${policy.policyId} obligation ${spec.id} condition could not evaluate (${String(err.message).split("\n")[0].slice(0, 160)}); it applies`);
+          applies = true;
+        }
+        if (!applies) continue;
+      }
+      obligations.push(obligationRecord(spec, policy));
+    }
+    return new Verdict(result, { ...rest, obligations, enforce: policy.enforce, retention: policy.retention });
   }
 
   _fail(policy, detail) {
     this._log.warn(`warrant policy ${policy.policyId} could not evaluate (${detail}); fail-${policy.failMode} applied`);
-    return new Verdict(FAIL_RESULT[policy.failMode], { policyId: policy.policyId, policyVersion: policy.version, reason: `fail-${policy.failMode}: ${detail}`, flagged: true });
+    return this._withAdr(policy, null, { result: FAIL_RESULT[policy.failMode], policyId: policy.policyId, policyVersion: policy.version, reason: `fail-${policy.failMode}: ${detail}`, flagged: true });
   }
 }
 

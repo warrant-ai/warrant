@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **The JavaScript SDK now has the whole warrant engine**: obligations and retention from policy bundles, the seven admissibility rules, `decision.warrant()`, fail-closed `commit()` and enforcement on `act()`, and lifecycle `transition()`. `conformance/admissibility-cases.json` (50 cases generated from the Python implementation, pinned by a Python test) is reproduced exactly by the JS suite, so the two SDKs cannot disagree about a verdict. JS has no store, so `transition()` takes `fromState`, and the decision record to leave `pending_evidence`
+- **A client recording to a collector can no longer warrant a decision that is missing evidence.** `Warrant.transition()` without a local store did not check a move from `pending_evidence` to `warranted`; it now requires the decision record (`decision=`) and applies the same rule as a local store. Found by the JS port
 ## 0.7.1 (2026-09-27)
 
 - **Key validity is judged when a record is sealed, not when the decision was made.** A signing store now stamps `seal.sealed_at` and signs it with the hash (`"adr/0.2 seal\n" + hash + "\n" + sealed_at`). In 0.7.0 a key was checked against the record's `timestamp`, so a key created today could not validly sign a record of a decision made last month: every imported record failed verification, and a revoked key could still sign records dated before its revocation. Found by the first backfill of real historical approvals. Records signed by 0.7.0 carry no `sealed_at` and still verify under the original message; both SDKs accept both forms, and `conformance/adr-vectors.json` gains a `seal_sealed_at` vector. The spec states the remaining limit: `sealed_at` is signed, but only a witnessed checkpoint fixes which records existed before a revocation

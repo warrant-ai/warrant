@@ -99,7 +99,7 @@ Before a mapped activity runs, its single object argument is checked against the
 
 ## Agent Decision Record
 
-Records can carry the fields of the Agent Decision Record 0.2 (`spec/adr-0.2.md` in the repository). This is on main for 0.7.0 and not yet released.
+Records carry the fields of the Agent Decision Record 0.2 (`spec/adr-0.2.md` in the repository), and from 0.7.1 the JavaScript SDK also applies its evidence rules: obligations, the warrant, fail-closed commit and lifecycle transitions.
 
 ```js
 await w.decide("credit.approve", { subject: "LN-7731" }, async (d) => {
@@ -116,7 +116,34 @@ await w.decide("credit.approve", { subject: "LN-7731" }, async (d) => {
 - **Agent identity** takes `model`, `runtime` and `identity: [registry, id]`.
 - **Verifier primitives:** `verifySeal`, `Keyring`, `SigningKey`, `recordHash`, `saltedHash`, and the RFC 9162 Merkle functions. They produce the same bytes as the Python package; `conformance/adr-vectors.json` is checked by both test suites.
 
-Python only in this release: obligations from policy bundles, the `warrant()` check, fail-closed `commit()`, lifecycle transitions, checkpoints and witnesses, `warrant verify` levels and `warrant trace`. A record written from JavaScript carries the evidence those need; the Python tools judge it.
+### Obligations and the warrant
+
+A policy bundle says what has to be true, from which providers and how fresh, and whether acting without a warrant must fail closed:
+
+```yaml
+enforce: true
+retention: {class: rbi-credit-8y, period: 2922d}
+obligations:
+  - {id: OB-1, requires: tool_call, name: bureau_pull, providers: [cibil, experian], max_age: 30d}
+  - {id: OB-2, requires: record, providers: [partner-data], max_age: 7d}
+  - {id: OB-3, requires: human_review, when: amount > 2500000}
+```
+
+```js
+await w.decide("credit.msme.approve", { subject: "LN-7731" }, (d) => {
+  d.check({ amount: 2_000_000, bureau_score: 742 });                 // picks up the obligations that apply
+  d.evidence("bureau_pull", { uri: "cibil://req/55120", type: "tool_call", provider: "cibil", content: bureau, retrievedAt });
+  d.cite(partnerRecord, { keyring: partnerKeys });
+  const state = d.warrant();                                          // { state, met, unmet, rejected, warranted }
+  d.commit("approve");                                                // throws NotWarranted without a warrant
+});
+```
+
+The seven admissibility rules, the lifecycle and the transition checks are a line-for-line port of the Python SDK's; `conformance/admissibility-cases.json` is generated from Python and both test suites must reproduce it exactly, reason codes and messages included. `new Warrant(stream, { enforce: true })` makes `act()` fail closed everywhere, not only where a policy says so.
+
+**One difference: there is no local store.** `w.transition(decisionRecordId, toState, { decidedBy, fromState, decision, reviewer, shown })` needs the state being left (`fromState`), and, for leaving `escalated` or `pending_evidence` for `warranted`, the decision record itself (`decision`) so it can check that a named reviewer is linked to what they were shown and that no evidence is missing. A transition can supply a person, never evidence.
+
+Python only: checkpoints and witnesses, `warrant verify` levels, `warrant trace`, packs, replay and import.
 
 ## Also in the box
 

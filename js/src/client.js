@@ -18,6 +18,7 @@ import { basename, extname, join } from "node:path";
 import { Emitter } from "./emit.js";
 import { SALT_BYTES, contentHash, recordHash, saltedHash } from "./hashing.js";
 import { verifySeal } from "./signing.js";
+import { AUTHORISING, STATES, assess, checkTransition, legal } from "./admissibility.js";
 import { ulid } from "./ids.js";
 import { SCHEMA_VERSION, ValidationError, validate } from "./schema.js";
 import { HttpSink } from "./sinks.js";
@@ -56,7 +57,11 @@ function asTimestamp(value) {
 
 /** Result of a mandate check. */
 export class Verdict {
-  constructor(result, { policyId, policyVersion, clause, reason, flagged = false } = {}) {
+  /**
+   * `obligations` are the obligation records that apply to this decision (ADR 1.4), `enforce` says
+   * acting without a warrant must fail closed, and `retention` is `{ class, seconds? }`.
+   */
+  constructor(result, { policyId, policyVersion, clause, reason, flagged = false, obligations = [], enforce = false, retention } = {}) {
     if (!MANDATE_RESULTS.includes(result)) throw new RangeError(`mandate result must be one of ${MANDATE_RESULTS.join(", ")}, got ${JSON.stringify(result)}`);
     this.result = result;
     this.policyId = policyId;
@@ -64,6 +69,12 @@ export class Verdict {
     this.clause = clause;
     this.reason = reason;
     this.flagged = Boolean(flagged);
+    // Not enumerable, so a verdict compares and serialises exactly as it did before 0.7.1.
+    Object.defineProperties(this, {
+      obligations: { value: Object.freeze(obligations.map((o) => Object.freeze({ ...o }))), enumerable: false },
+      enforce: { value: Boolean(enforce), enumerable: false },
+      retention: { value: retention ? Object.freeze({ ...retention }) : undefined, enumerable: false },
+    });
     Object.freeze(this);
   }
 
@@ -79,6 +90,41 @@ export class CitationError extends Error {
     super(message);
     this.name = "CitationError";
   }
+}
+
+/**
+ * A decision tried to act without a warrant: fail closed (ADR level 2). `state` is the lifecycle
+ * state it reached instead, and `unmet` the verifiable obligations no admitted evidence satisfied.
+ */
+export class NotWarranted extends Error {
+  constructor(recordId, state, unmet) {
+    const detail = unmet.length ? `; unmet: ${unmet.join(", ")}` : "";
+    super(`decision ${recordId} is ${state ?? "not assessed"}, not warranted${detail}`);
+    this.name = "NotWarranted";
+    this.recordId = recordId;
+    this.state = state;
+    this.unmet = [...unmet];
+  }
+}
+
+/** What `Decision.warrant()` found: the state reached, and why. */
+export class WarrantState {
+  constructor(state, met, unmet, rejected) {
+    this.state = state;
+    this.met = Object.freeze([...met]);
+    this.unmet = Object.freeze([...unmet]);
+    /** `[evidenceName, reasonCode]` for every item the rules rejected. */
+    this.rejected = Object.freeze(rejected.map((r) => Object.freeze([...r])));
+    Object.freeze(this);
+  }
+
+  get warranted() {
+    return AUTHORISING.includes(this.state);
+  }
+}
+
+function nowIso() {
+  return new Date().toISOString();
 }
 
 /** One consequential action, opened by `Warrant.decide()` and closed when its callback settles. */
@@ -109,6 +155,9 @@ export class Decision {
     this._claims = [];
     this._parents = [];
     this._retention = undefined;
+    this._obligations = [];
+    this._warrantAt = null;
+    this._openedAt = nowIso();
     this._closed = false;
   }
 
@@ -126,6 +175,11 @@ export class Decision {
       if (!(verdict instanceof Verdict)) throw new TypeError("policy.evaluate() must return a Verdict");
       this._verdict = verdict;
     }
+    const known = new Set(this._obligations.map((o) => o.id));
+    for (const ob of this._verdict.obligations ?? []) {
+      if (!known.has(ob.id)) this._obligations.push({ ...ob });
+    }
+    if (this._verdict.retention && this._retention === undefined) this._applyPolicyRetention(this._verdict.retention);
     return this._verdict;
   }
 
@@ -262,6 +316,88 @@ export class Decision {
     this._retention = item;
   }
 
+  _applyPolicyRetention(policyRetention) {
+    const item = { class: policyRetention.class };
+    if (policyRetention.seconds) item.retain_until = new Date(Date.parse(this._openedAt) + policyRetention.seconds * 1000).toISOString();
+    this._retention = item;
+  }
+
+  // -- the warrant (ADR level 2) -----------------------------------------------
+
+  /** Declare an obligation by hand. Policy bundles normally supply these through `check()`. */
+  obligation(obligationId, { requires, kind = "verifiable", providers = [], maxAgeSeconds, name, clause } = {}) {
+    this._assertOpen();
+    requireText(obligationId, "obligation id");
+    if (this._obligations.some((o) => o.id === obligationId)) throw new Error(`obligation ${JSON.stringify(obligationId)} is already declared`);
+    if (!EVIDENCE_TYPES.includes(requires)) throw new RangeError(`requires must be one of ${EVIDENCE_TYPES.join(", ")}, got ${JSON.stringify(requires)}`);
+    if (!["verifiable", "advisory"].includes(kind)) throw new RangeError("kind must be verifiable or advisory");
+    if (!Array.isArray(providers)) throw new TypeError("providers must be a list of provider names");
+    if (providers.includes("self")) throw new RangeError("'self' cannot be a qualified provider");
+    if (maxAgeSeconds !== undefined && !(Number.isInteger(maxAgeSeconds) && maxAgeSeconds >= 0)) throw new RangeError("maxAgeSeconds must be a non-negative integer");
+    const ob = { id: obligationId, requires, kind };
+    if (providers.length) ob.providers = [...providers];
+    if (maxAgeSeconds !== undefined) ob.max_age_seconds = maxAgeSeconds;
+    if (name !== undefined) ob.name = name;
+    if (clause !== undefined) ob.clause = clause;
+    this._obligations.push(ob);
+  }
+
+  /** Apply the admissibility rules to the evidence so far and report the state reached. */
+  warrant() {
+    this._assertOpen();
+    this._warrantAt = nowIso();
+    this._autoOffer();
+    const draft = this._compose("withheld", this._action ?? "none", this._summary, { final: false });
+    const assessment = assess(draft, { at: this._warrantAt });
+    const rejected = Object.keys(assessment.admissions)
+      .map(Number)
+      .sort((a, b) => a - b)
+      .filter((i) => assessment.admissions[i].status === "rejected")
+      .map((i) => [draft.evidence[i].name ?? String(i), assessment.admissions[i].reason ?? ""]);
+    return new WarrantState(assessment.state, assessment.met, assessment.unmet, rejected);
+  }
+
+  /** Act only on a warrant. Throws `NotWarranted` instead of recording the action. */
+  commit(action, options = {}) {
+    const state = this.warrant();
+    if (!state.warranted) throw new NotWarranted(this.recordId, state.state, state.unmet);
+    this._act(action, options);
+  }
+
+  _enforced() {
+    return Boolean(this._client.enforce || (this._verdict && this._verdict.enforce));
+  }
+
+  /**
+   * Offer an unassigned item to the one obligation it can only be meant for: by the obligation's
+   * `name` first, then by type when exactly one obligation requires that type. Written onto the
+   * record, so a verifier judges the same pairing.
+   */
+  _autoOffer() {
+    for (const item of this._evidence) {
+      if ("obligation" in item || item.type === "model_call") continue;
+      const byName = this._obligations.filter((o) => o.name && o.name === item.name);
+      const byType = this._obligations.filter((o) => !o.name && o.requires === item.type);
+      const match = byName.length ? byName : byType;
+      if (match.length === 1) item.obligation = match[0].id;
+    }
+  }
+
+  /** Obligations with met and unmet, admissions on the evidence, and the verdict (ADR 1.4, 2, 3). */
+  _attachVerdict(record, verdict) {
+    record.obligations = this._obligations.map((o) => ({ ...o }));
+    const at = this._warrantAt ?? nowIso();
+    record.verdict = { state: "proposed", at };
+    const assessment = assess(record, { at });
+    record.obligations = assessment.obligations;
+    for (const [index, admission] of Object.entries(assessment.admissions)) record.evidence[Number(index)].admission = admission;
+    const out = { state: assessment.state ?? "proposed", decided_by: verdict.policyId ? `policy:${verdict.policyId}@${verdict.policyVersion}` : "rules:adr/0.2", at };
+    if (assessment.met.length) out.met = assessment.met;
+    if (assessment.unmet.length) out.unmet = assessment.unmet;
+    out.history = assessment.history.map((state) => ({ state, at }));
+    record.verdict = out;
+  }
+
   /** Record one model call as evidence and as a cost line. */
   modelCall(provider, model, { tokensIn = 0, tokensOut = 0, amount = 0, uri, content, contentHash: given, excerpt } = {}) {
     this._assertOpen();
@@ -303,8 +439,20 @@ export class Decision {
 
   // -- action and human review -----------------------------------------------
 
-  /** Record that the action was taken. Call it once, after the action succeeds. */
-  act(action, { summary, costCentre, alternatives } = {}) {
+  /**
+   * Record that the action was taken. Call it once, after the action succeeds. Where the policy
+   * for this class sets `enforce: true`, or the client was created with `enforce: true`, acting
+   * without a warrant throws `NotWarranted` (fail closed).
+   */
+  act(action, options = {}) {
+    if (this._enforced()) {
+      const state = this.warrant();
+      if (!state.warranted) throw new NotWarranted(this.recordId, state.state, state.unmet);
+    }
+    this._act(action, options);
+  }
+
+  _act(action, { summary, costCentre, alternatives } = {}) {
     this._assertOpen();
     requireText(action, "action");
     if (this._action !== null) throw new Error(`act() already called on decision ${this.recordId} with ${JSON.stringify(this._action)}`);
@@ -328,7 +476,6 @@ export class Decision {
   }
 
   _build(failure) {
-    const client = this._client;
     let status, action, summary;
     if (failure !== undefined) {
       status = "failed";
@@ -344,7 +491,12 @@ export class Decision {
       action = "none";
       summary = this._summary ?? (this._verdict ? `withheld: mandate result was ${this._verdict.result}` : "withheld");
     }
+    if (this._obligations.length) this._autoOffer();
+    return this._compose(status, action, summary, { final: true });
+  }
 
+  _compose(status, action, summary, { final }) {
+    const client = this._client;
     const decision = { class: this.decisionClass, action, subject: this.subject, status };
     if (summary) decision.summary = summary;
     if (this._alternatives.length) decision.alternatives = this._alternatives;
@@ -383,13 +535,15 @@ export class Decision {
       actor,
       decision,
       mandate,
-      evidence: this._evidence,
-      human: this._human,
+      evidence: this._evidence.map((e) => ({ ...e })),
+      human: { ...this._human },
       cost,
       outcome: { status: "pending" },
     };
     if (this._parents.length) record.parents = this._parents.map((p) => ({ ...p }));
     if (this._retention) record.retention = { ...this._retention };
+    if (this._obligations.length || this._warrantAt) this._attachVerdict(record, verdict);
+    if (!final) return record;
     const out = client.redactor ? client.redactor.apply(record) : record;
     // The sidecar travels with the record to the collector, which stores it apart and strips it
     // before sealing; it never becomes part of the sealed record.
@@ -423,7 +577,7 @@ function agentFrom(agent, logger) {
 
 /** Entry point. One instance per stream; share it across decisions. */
 export class Warrant {
-  constructor(stream, { tenant, store, token, agent, onBehalfOf, policy, redact, currency, captureInputs = false, spillDir, maxQueue, batchSize, flushIntervalMs, logger = console } = {}) {
+  constructor(stream, { tenant, store, token, agent, onBehalfOf, policy, redact, currency, captureInputs = false, enforce = false, spillDir, maxQueue, batchSize, flushIntervalMs, logger = console } = {}) {
     this.stream = requireText(stream, "stream");
     this.tenant = tenant ?? process.env.WARRANT_TENANT ?? "local";
     this.currency = currency ?? process.env.WARRANT_CURRENCY ?? "USD";
@@ -434,6 +588,7 @@ export class Warrant {
     this.policy = policy;
     this.redactor = redact;
     this.captureInputs = Boolean(captureInputs);
+    this.enforce = Boolean(enforce);
     this._log = logger;
 
     const target = store ?? process.env.WARRANT_STORE;
@@ -503,6 +658,44 @@ export class Warrant {
     const human = { required: true, reviewer, verdict, at: asTimestamp(at) };
     if (note) human.note = note;
     return this._appendLinked("human_verdict", decisionRecordId, { human }, recordId);
+  }
+
+  /**
+   * Append a lifecycle transition for an earlier decision (ADR 3). History is never edited.
+   *
+   * The JavaScript SDK has no store to read the decision back from, so the caller passes the state
+   * being left (`fromState`) and, for the checks that depend on it, the decision record itself
+   * (`decision`): leaving `escalated` or `pending_evidence` for `warranted` needs a named
+   * `reviewer` linked by digest to what they were `shown`, and a transition can never supply
+   * missing evidence. Returns the new record id.
+   */
+  transition(decisionRecordId, toState, { decidedBy, fromState, decision, reviewer, shown, reason, recordId } = {}) {
+    if (!STATES.includes(toState)) throw new RangeError(`toState must be one of ${STATES.join(", ")}, got ${JSON.stringify(toState)}`);
+    if (typeof decidedBy !== "string" || !decidedBy) throw new TypeError("decidedBy must name who decided, e.g. human:a.rao or policy:CR-07@2026.4");
+    if (fromState === undefined || fromState === null) throw new TypeError("pass fromState: there is no local store to read the current state from");
+    if (!STATES.includes(fromState)) throw new RangeError(`fromState must be one of ${STATES.join(", ")}, got ${JSON.stringify(fromState)}`);
+    if (!legal(fromState, toState)) throw new Error(`illegal transition ${fromState} -> ${toState}`);
+    let human;
+    if (reviewer !== undefined || shown !== undefined) {
+      requireText(reviewer, "a human transition needs the reviewer's name: reviewer");
+      const list = [...(shown ?? [])];
+      if (list.some((d) => typeof d !== "string" || !SHA256_RE.test(d))) throw new TypeError("shown must be sha256 digests of the material the reviewer saw");
+      human = { required: true, reviewer, shown: list, at: nowIso(), verdict: toState === "refused" ? "reject" : "approve" };
+    }
+    const verdict = { state: toState, from_state: fromState, decided_by: decidedBy, at: nowIso() };
+    if (reason) verdict.reason = reason;
+    const section = { verdict };
+    if (human) section.human = human;
+    if (decision) {
+      if (decision.record_id && decision.record_id !== decisionRecordId) throw new Error(`the decision given is ${decision.record_id}, not ${decisionRecordId}`);
+      const problem = checkTransition(decision, fromState, section);
+      if (problem) throw new Error(problem);
+    } else if (toState === "warranted" && fromState === "escalated" && !human) {
+      throw new Error("leaving escalated for warranted needs a named reviewer and the digests they were shown");
+    } else if (toState === "warranted" && fromState === "pending_evidence") {
+      throw new Error("leaving pending_evidence for warranted needs the decision record, to check that only a person was missing: pass decision");
+    }
+    return this._appendLinked("transition", decisionRecordId, section, recordId);
   }
 
   _appendLinked(recordType, decisionRecordId, section, recordId) {

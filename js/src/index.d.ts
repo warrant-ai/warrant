@@ -24,8 +24,30 @@ export class ValidationError extends Error {
 export function validate(record: unknown): void;
 export function loadSchema(): Record<string, unknown>;
 
+/** One obligation as written onto a record (ADR 1.4). */
+export interface ObligationRecord {
+  id: string;
+  requires: EvidenceType;
+  kind: "verifiable" | "advisory";
+  policy_id?: string;
+  policy_version?: string;
+  providers?: string[];
+  max_age_seconds?: number;
+  name?: string;
+  clause?: string;
+  title?: string;
+}
+
 export class Verdict {
-  constructor(result: MandateResult, details?: { policyId?: string; policyVersion?: string; clause?: string; reason?: string; flagged?: boolean });
+  constructor(result: MandateResult, details?: {
+    policyId?: string; policyVersion?: string; clause?: string; reason?: string; flagged?: boolean;
+    obligations?: ObligationRecord[]; enforce?: boolean; retention?: { class: string; seconds?: number };
+  });
+  /** The obligations that apply to this decision. */
+  readonly obligations: readonly ObligationRecord[];
+  /** Acting without a warrant fails closed. */
+  readonly enforce: boolean;
+  readonly retention?: { readonly class: string; readonly seconds?: number };
   readonly result: MandateResult;
   readonly policyId?: string;
   readonly policyVersion?: string;
@@ -105,8 +127,14 @@ export class Decision {
   modelCall(provider: string, model: string, options?: { tokensIn?: number; tokensOut?: number; amount?: number; uri?: string; content?: unknown; contentHash?: string; excerpt?: string }): string;
   toolCall(name: string, options?: { uri?: string; content?: unknown; contentHash?: string; amount?: number; provider?: string; excerpt?: string }): string;
   cost(amount: number, options?: { kind?: CostKind; provider?: string; model?: string; tokensIn?: number; tokensOut?: number }): void;
-  /** Call once, after the action succeeds. */
+  /** Call once, after the action succeeds. Throws `NotWarranted` when enforcement applies and there is no warrant. */
   act(action: string, options?: { summary?: string; costCentre?: string; alternatives?: string[] }): void;
+  /** Declare an obligation by hand; policy bundles normally supply these through `check()`. */
+  obligation(obligationId: string, options: { requires: EvidenceType; kind?: "verifiable" | "advisory"; providers?: string[]; maxAgeSeconds?: number; name?: string; clause?: string }): void;
+  /** Apply the admissibility rules to the evidence so far and report the state reached. */
+  warrant(): WarrantState;
+  /** Act only on a warrant; throws `NotWarranted` otherwise. */
+  commit(action: string, options?: { summary?: string; costCentre?: string; alternatives?: string[] }): void;
   requireHuman(options?: { reviewer?: string; note?: string }): void;
   /** The hex salt behind a sensitive item's digest. */
   saltFor(digest: string): string | undefined;
@@ -131,6 +159,8 @@ export interface WarrantOptions {
   currency?: string;
   /** Store `check()` inputs on the record. For development and staging. */
   captureInputs?: boolean;
+  /** Acting without a warrant fails closed for every decision class, not only where the policy says so. */
+  enforce?: boolean;
   spillDir?: string;
   maxQueue?: number;
   batchSize?: number;
@@ -160,6 +190,14 @@ export class Warrant {
   decide<T>(decisionClass: string, options: { subject: string; onBehalfOf?: string; alternatives?: string[]; recordId?: string }, fn: (decision: Decision) => T | Promise<T>): Promise<T>;
   /** Returns the new record id. */
   outcome(options: { label: string; decisionRecordId: string; observedAt?: Timestamp; score?: number; source?: string }): string;
+  /**
+   * Append a lifecycle transition. There is no local store, so pass `fromState`, and `decision`
+   * (the decision record) for the human and evidence checks. Returns the new record id.
+   */
+  transition(decisionRecordId: string, toState: LifecycleState, options: {
+    decidedBy: string; fromState: LifecycleState; decision?: DecisionRecord;
+    reviewer?: string; shown?: string[]; reason?: string; recordId?: string;
+  }): string;
   /** Returns the new record id. */
   humanVerdict(options: { reviewer: string; verdict: HumanVerdict; decisionRecordId: string; note?: string; at?: Timestamp; recordId?: string }): string;
   /** Resolves false on timeout. */
@@ -170,6 +208,49 @@ export class Warrant {
 
 /** The innermost open decision in this async context. */
 export function currentDecision(): Decision | undefined;
+
+/** A decision tried to act without a warrant (fail closed). */
+export class NotWarranted extends Error {
+  readonly recordId: string;
+  readonly state: LifecycleState | null;
+  readonly unmet: string[];
+}
+
+/** What `Decision.warrant()` found. */
+export class WarrantState {
+  readonly state: LifecycleState | null;
+  readonly met: readonly string[];
+  readonly unmet: readonly string[];
+  /** `[evidenceName, reasonCode]` for each rejected item. */
+  readonly rejected: readonly (readonly [string, string])[];
+  readonly warranted: boolean;
+}
+
+// Admissibility and lifecycle (ADR 2 and 3), identical to the Python SDK's warrant.admissibility.
+export const STATES: readonly LifecycleState[];
+export const TERMINAL: readonly LifecycleState[];
+export const AUTHORISING: readonly LifecycleState[];
+export const EDGES: Readonly<Record<LifecycleState, readonly LifecycleState[]>>;
+export const REASONS: readonly string[];
+export interface Assessment {
+  obligations: (ObligationRecord & { met: boolean; satisfied_by: string[] })[];
+  admissions: Record<number, { status: "admitted" } | { status: "rejected"; reason: string }>;
+  met: string[];
+  unmet: string[];
+  advisoryUnmet: string[];
+  state: LifecycleState | null;
+  history: LifecycleState[];
+}
+export function legal(fromState: string, toState: string): boolean;
+export function selfAttested(item: Record<string, unknown>, actorName?: string | null): boolean;
+export function admit(item: Record<string, unknown>, obligation: ObligationRecord, context: { actorName?: string | null; at?: number | null; parents: Map<string, Record<string, unknown>> }): [boolean, string | null];
+export function humanLinked(human: Record<string, unknown> | undefined | null, digests: Iterable<string>): [boolean, string | null];
+export function recordDigests(record: DecisionRecord): string[];
+/** `at` is the verdict time for freshness; defaults to the record's `verdict.at` or timestamp. */
+export function assess(record: DecisionRecord, options?: { at?: string }): Assessment;
+export function deriveState(record: DecisionRecord, unmet: string[]): [LifecycleState | null, LifecycleState[]];
+export function checkHistory(history: (string | null)[]): string | null;
+export function checkTransition(decision: DecisionRecord, current: string, transition: DecisionRecord): string | null;
 
 export class Redactor {
   constructor(options?: { patterns?: Iterable<string | RegExp>; fields?: Iterable<string>; replacement?: string });

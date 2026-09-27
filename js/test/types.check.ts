@@ -1,5 +1,5 @@
 // Compiled with `npm run typecheck`, never run: proves the declarations match how the SDK is used.
-import { Decision, HttpSink, Keyring, Redactor, SigningKey, Verdict, Warrant, currentDecision, merkleRoot, saltedHash, verifySeal, type PolicyEngine, type Sink } from "warrantai";
+import { Decision, HttpSink, Keyring, NotWarranted, Redactor, SigningKey, Verdict, Warrant, WarrantState, assess, checkTransition, currentDecision, legal, merkleRoot, saltedHash, verifySeal, type Assessment, type PolicyEngine, type Sink } from "warrantai";
 
 const policy: PolicyEngine = { evaluate: (_cls, inputs) => new Verdict(Number(inputs.amount) > 5 ? "deny" : "allow", { policyId: "CR-07" }) };
 const sink: Sink = { write: async (records) => void records.length };
@@ -49,4 +49,27 @@ w.decide("credit.approve", { subject: "x" }, (d) => d.cite());
 // @ts-expect-error a keyring, not a key set document
 w.decide("credit.approve", { subject: "x" }, (d) => d.cite({}, { keyring: { keys: [] } }));
 
-void [approved, flushed, open, issuer, root, salted];
+// The warrant (ADR level 2)
+new Warrant("lending", { store: sink, enforce: true });
+w.decide("credit.approve", { subject: "LN-3" }, (d) => {
+  d.obligation("OB-1", { requires: "tool_call", providers: ["cibil"], maxAgeSeconds: 86400 });
+  const state: WarrantState = d.warrant();
+  const ok: boolean = state.warranted;
+  if (ok) d.commit("approve", { summary: "within mandate" });
+});
+const transitionId: string = w.transition("01K5A3Q7Z2XV8M9N4B6C1D0001", "committed", { decidedBy: "agent:sanction", fromState: "warranted" });
+const assessed: Assessment = assess({}, { at: "2026-09-27T10:00:00Z" });
+const problem: string | null = checkTransition({}, "warranted", {});
+const edge: boolean = legal("warranted", "committed");
+const blocked = new Error() instanceof NotWarranted;
+
+// @ts-expect-error an obligation needs the evidence type it requires
+w.decide("credit.approve", { subject: "x" }, (d) => d.obligation("OB-1", {}));
+// @ts-expect-error not an evidence type
+w.decide("credit.approve", { subject: "x" }, (d) => d.obligation("OB-1", { requires: "telepathy" }));
+// @ts-expect-error a transition must say where it leaves from
+w.transition("01K5A3Q7Z2XV8M9N4B6C1D0001", "committed", { decidedBy: "agent:sanction" });
+// @ts-expect-error not a lifecycle state
+w.transition("01K5A3Q7Z2XV8M9N4B6C1D0001", "approved", { decidedBy: "x", fromState: "warranted" });
+
+void [approved, flushed, open, issuer, root, salted, transitionId, assessed, problem, edge, blocked];

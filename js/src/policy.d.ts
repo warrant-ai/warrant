@@ -33,7 +33,28 @@ export interface Policy {
   title?: string;
   tests: PolicyTest[];
   source: string;
+  /** What has to be true for a decision of these classes to be warranted. */
+  obligations: ObligationSpec[];
+  /** Acting without a warrant fails closed. */
+  enforce: boolean;
+  retention?: { class: string; seconds?: number };
 }
+
+export interface ObligationSpec {
+  id: string;
+  requires: string;
+  kind: "verifiable" | "advisory";
+  providers: string[];
+  maxAgeSeconds?: number;
+  name?: string;
+  clause?: string;
+  title?: string;
+  /** CEL over the same inputs as the clauses; an obligation whose condition cannot evaluate applies. */
+  when?: string;
+}
+
+/** `30d`, `12h`, `90m`, `45s` or whole seconds. */
+export function parseDuration(value: string | number, where: string): number;
 
 export interface PolicyTestResult {
   policyId: string;

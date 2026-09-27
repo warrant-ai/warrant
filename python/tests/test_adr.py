@@ -532,3 +532,24 @@ def test_an_identity_can_carry_a_registry_uri(tmp_path):
     record = next(w.store.iter_records())
     w.close()
     assert record["actor"]["identity"]["uri"] == "https://registry.example/AGT-1"
+
+
+def test_a_collector_client_cannot_warrant_a_decision_missing_evidence(world):
+    """Without a store the decision record must be passed, so the evidence rule still applies."""
+    with world.bank.decide("credit.msme.approve", subject="LN-15") as d:
+        d.check(amount=2_000_000, bureau_score=742)
+    decision = [r for r in _records(world) if r["record_id"] == d.record_id][0]
+    sent = []
+
+    class Collector:
+        def write(self, records):
+            sent.extend(records)
+
+    remote = Warrant("lending", tenant="demo-bank", store=Collector(), agent=AgentInfo("credit-agent", "3"), flush_interval=0.02)
+    try:
+        with pytest.raises(ValueError, match="needs the decision record"):
+            remote.transition(d.record_id, "warranted", decided_by="human:x", from_state="pending_evidence", reviewer="x", shown=[])
+        with pytest.raises(ValueError, match="need evidence"):
+            remote.transition(d.record_id, "warranted", decided_by="human:x", from_state="pending_evidence", reviewer="x", shown=[], decision=decision)
+    finally:
+        remote.close()
