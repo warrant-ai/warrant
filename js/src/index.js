@@ -8,9 +8,11 @@
  */
 
 export { SCHEMA_VERSION, VERSION, ValidationError, loadSchema, validate } from "./schema.js";
-export { Decision, EVIDENCE_TYPES, HUMAN_VERDICTS, MANDATE_RESULTS, Verdict, Warrant, currentDecision } from "./client.js";
+export { CitationError, Decision, EVIDENCE_TYPES, HUMAN_VERDICTS, LIFECYCLE_STATES, MANDATE_RESULTS, Verdict, Warrant, currentDecision } from "./client.js";
 export { Emitter, PermanentSinkError, SinkError } from "./emit.js";
 export { HttpSink } from "./sinks.js";
 export { Redactor, TEXT_FIELDS } from "./redaction.js";
-export { canonicalJson, contentHash } from "./hashing.js";
+export { SALT_BYTES, canonicalJson, contentBytes, contentHash, recordHash, saltedHash } from "./hashing.js";
+export { CHECKPOINT_CONTEXT, Keyring, PublicKey, SEAL_CONTEXT, SigningError, SigningKey, keyIdFor, verifySeal } from "./signing.js";
+export { consistencyProof, inclusionProof, merkleRoot, verifyConsistency, verifyInclusion } from "./merkle.js";
 export { deterministicUlid, ulid } from "./ids.js";

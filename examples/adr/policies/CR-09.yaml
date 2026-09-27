@@ -1,0 +1,38 @@
+policy_id: CR-09
+version: "2026.10"
+title: MSME working-capital credit, with a partner's GST verification
+classes: [credit.msme.approve]
+fail_mode: closed
+default: escalate
+enforce: true
+retention: {class: rbi-credit-8y, period: 2922d}
+clauses:
+  - id: "5.1"
+    title: Decline below bureau floor
+    when: bureau_score < 650
+    result: deny
+  - id: "5.2"
+    title: Approve working capital up to 50,00,000 within turnover multiple
+    when: amount <= 5000000 && bureau_score >= 700
+    result: allow
+obligations:
+  - id: OB-1
+    title: Bureau pull from a named bureau, no older than 30 days
+    clause: "5.2"
+    requires: tool_call
+    name: bureau_pull
+    providers: [cibil, experian]
+    max_age: 30d
+  - id: OB-2
+    title: GST turnover verified by the partner's data agent, warranted
+    clause: "5.2"
+    requires: record
+    providers: [partner-data]
+    max_age: 7d
+  - id: OB-3
+    title: Credit officer sign-off above 25,00,000
+    requires: human_review
+    when: amount > 2500000
+tests:
+  - {name: small ticket approves, inputs: {amount: 2000000, bureau_score: 742}, expect: allow, clause: "5.2"}
+  - {name: low score declines, inputs: {amount: 2000000, bureau_score: 610}, expect: deny, clause: "5.1"}

@@ -1,0 +1,21 @@
+policy_id: GST-01
+version: "2026.10"
+title: GST filings verification for lending partners
+classes: [gst.verify]
+fail_mode: closed
+default: deny
+enforce: true
+clauses:
+  - id: "1"
+    title: Verify when the GSTN response is in hand
+    when: filings_found == true
+    result: allow
+obligations:
+  - id: G-1
+    title: GSTN response from the GST network, no older than 1 day
+    requires: tool_call
+    name: gstn_returns
+    providers: [gstn]
+    max_age: 1d
+tests:
+  - {name: filings found, inputs: {filings_found: true}, expect: allow, clause: "1"}

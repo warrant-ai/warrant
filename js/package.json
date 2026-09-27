@@ -35,7 +35,7 @@
     "node": ">=18"
   },
   "scripts": {
-    "test": "node --test test/schema.test.js test/cli.test.js test/sdk.test.js test/emit.test.js test/sink.test.js test/policy.test.js test/adapter-temporal.test.js",
+    "test": "node --test test/schema.test.js test/cli.test.js test/sdk.test.js test/emit.test.js test/sink.test.js test/policy.test.js test/adapter-temporal.test.js test/adr.test.js",
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {

@@ -1,5 +1,5 @@
 // Compiled with `npm run typecheck`, never run: proves the declarations match how the SDK is used.
-import { Decision, HttpSink, Redactor, Verdict, Warrant, currentDecision, type PolicyEngine, type Sink } from "warrantai";
+import { Decision, HttpSink, Keyring, Redactor, SigningKey, Verdict, Warrant, currentDecision, merkleRoot, saltedHash, verifySeal, type PolicyEngine, type Sink } from "warrantai";
 
 const policy: PolicyEngine = { evaluate: (_cls, inputs) => new Verdict(Number(inputs.amount) > 5 ? "deny" : "allow", { policyId: "CR-07" }) };
 const sink: Sink = { write: async (records) => void records.length };
@@ -27,4 +27,26 @@ w.humanVerdict({ reviewer: "asha", verdict: "maybe", decisionRecordId: id });
 // @ts-expect-error evidence needs a uri
 w.decide("credit.approve", { subject: "x" }, (d) => d.evidence("e", { content: "c" }));
 
-void [approved, flushed, open];
+const key = SigningKey.fromPrivateBytes("demo-bank", new Uint8Array(32));
+const ring = new Keyring([key.public]);
+const check = verifySeal({}, ring);
+const issuer: string | undefined = check.ok ? check.issuer : undefined;
+const root: string = merkleRoot(["00".repeat(32)]);
+const salted: string = saltedHash("x", new Uint8Array(32));
+new Warrant("lending", { store: sink, agent: { name: "a", version: "1", identity: ["npci-agent-registry", "AGT-1"] } });
+w.decide("credit.approve", { subject: "LN-2" }, (d) => {
+  const s: string = d.evidence("pan", { uri: "kyc://1", content: "x", sensitive: true, provider: "nsdl", obligation: "OB-1" });
+  d.claim("turnover", 1);
+  d.cite({}, { keyring: ring, state: "committed" });
+  d.retention("rbi-credit-8y", { legalHold: true });
+  return s;
+});
+
+// @ts-expect-error not a lifecycle state
+w.decide("credit.approve", { subject: "x" }, (d) => d.cite({}, { state: "approved" }));
+// @ts-expect-error cite needs the parent record
+w.decide("credit.approve", { subject: "x" }, (d) => d.cite());
+// @ts-expect-error a keyring, not a key set document
+w.decide("credit.approve", { subject: "x" }, (d) => d.cite({}, { keyring: { keys: [] } }));
+
+void [approved, flushed, open, issuer, root, salted];

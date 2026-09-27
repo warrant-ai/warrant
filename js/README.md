@@ -97,6 +97,27 @@ const worker = await Worker.create({ ..., activities, interceptors: { activity: 
 
 Before a mapped activity runs, its single object argument is checked against the policy (any other call shape is presented as `{ args }` for mapping functions to read). A denied or escalated activity is recorded as withheld and fails with a non-retryable `ApplicationFailure` of type `WarrantDenied` or `WarrantEscalated`, so the retry policy does not re-run it and the workflow can catch it and hand the case to a person; the failure's details carry the record id. Every record names the Temporal execution as evidence. One record per attempt, with ids derived from the attempt's identity, so a batch delivered twice is written once. The run's other activities are evidence for its next decision, by hash. `modelUsage(provider, model, { tokensIn, tokensOut })` inside an activity puts the model call's cost on the record. Workflow-side decisions and approval hand-offs are in the Python adapter today.
 
+## Agent Decision Record
+
+Records can carry the fields of the Agent Decision Record 0.2 (`spec/adr-0.2.md` in the repository). This is on main for 0.7.0 and not yet released.
+
+```js
+await w.decide("credit.approve", { subject: "LN-7731" }, async (d) => {
+  d.evidence("pan", { uri: "kyc://req/1", type: "document", provider: "nsdl", content: pan, sensitive: true });
+  d.cite(partnerRecord, { keyring: Keyring.fromKeySets(partnerKeySet), obligation: "OB-2" });
+  d.claim("gst_turnover_inr", 42000000);
+  d.retention("rbi-credit-8y", { retainUntil: "2034-09-27T00:00:00Z" });
+  d.act("approve");
+});
+```
+
+- **Sensitive evidence** gets a salted digest, and the salt travels to the collector's sidecar, never onto the record. `saltFor(digest)` returns it. A sensitive item cannot carry an excerpt.
+- **`cite()`** relies on an upstream sealed record by id and hash. It refuses a record that no longer matches its seal and, given a keyring, one whose issuer signature does not verify. The parent's claims are not copied.
+- **Agent identity** takes `model`, `runtime` and `identity: [registry, id]`.
+- **Verifier primitives:** `verifySeal`, `Keyring`, `SigningKey`, `recordHash`, `saltedHash`, and the RFC 9162 Merkle functions. They produce the same bytes as the Python package; `conformance/adr-vectors.json` is checked by both test suites.
+
+Python only in this release: obligations from policy bundles, the `warrant()` check, fail-closed `commit()`, lifecycle transitions, checkpoints and witnesses, `warrant verify` levels and `warrant trace`. A record written from JavaScript carries the evidence those need; the Python tools judge it.
+
 ## Also in the box
 
 `validate(record)` and `loadSchema()` for the decision record schema v0, `currentDecision()` for integrations, and a small CLI: `warrant --version | schema | validate <file>`.

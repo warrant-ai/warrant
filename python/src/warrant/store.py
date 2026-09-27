@@ -83,22 +83,37 @@ def refuse_mangled_url(target: str) -> None:
         )
 
 
-def open_store(url: Union[str, Path], *, read_only: bool = False):
-    """``postgres://...`` or ``postgresql://...`` opens a PostgreSQL store; anything else is a SQLite path."""
+def open_store(url: Union[str, Path], *, read_only: bool = False, signer: Any = None):
+    """``postgres://...`` or ``postgresql://...`` opens a PostgreSQL store; anything else is a SQLite path.
+
+    ``signer`` is a :class:`warrant.signing.SigningKey`; a store given one signs every record it seals.
+    """
     text = str(url)
     refuse_mangled_url(text)
     if text.startswith(("postgres://", "postgresql://")):
         from warrant.pg import PostgresStore
 
-        return PostgresStore(text, read_only=read_only)
-    return SQLiteStore(url, read_only=read_only)
+        return PostgresStore(text, read_only=read_only, signer=signer)
+    return SQLiteStore(url, read_only=read_only, signer=signer)
+
+
+def seal_record(record: Dict[str, Any], stream_seq: int, prev_hash: Optional[str], signer: Any) -> Dict[str, Any]:
+    """Assign the sequence, chain the hash and, with a signer, add the issuer's signature (ADR 5.1)."""
+    sealed = dict(record)
+    sealed["sequence"] = stream_seq
+    seal: Dict[str, Any] = {"prev_hash": prev_hash, "hash": record_hash(sealed, prev_hash)}
+    if signer is not None:
+        seal.update(signer.sign_seal(seal["hash"]))
+    sealed["seal"] = seal
+    return sealed
 
 
 class SQLiteStore:
     """Append-only local store. Safe to share between the emitter thread and callers."""
 
-    def __init__(self, path: Union[str, Path], *, read_only: bool = False) -> None:
+    def __init__(self, path: Union[str, Path], *, read_only: bool = False, signer: Any = None) -> None:
         self.path = Path(path)
+        self.signer = signer
         self._lock = threading.Lock()
         if read_only:
             if not self.path.exists():
@@ -178,9 +193,7 @@ class SQLiteStore:
         stream_seq = (head["stream_seq"] + 1) if head else 1
         prev_hash = head["hash"] if head else None
 
-        sealed = dict(record)
-        sealed["sequence"] = stream_seq
-        sealed["seal"] = {"prev_hash": prev_hash, "hash": record_hash(sealed, prev_hash)}
+        sealed = seal_record(record, stream_seq, prev_hash, self.signer)
         try:
             validate(sealed)
         except ValidationError as exc:
@@ -258,6 +271,14 @@ class SQLiteStore:
             row = self._conn.execute("SELECT blob FROM evidence_blobs WHERE hash = ?", (content_hash,)).fetchone()
         return json.loads(row["blob"]) if row else None
 
+    def linked(self, decision_record_id: str) -> List[Dict[str, Any]]:
+        """Records that reference a decision (outcomes, verdicts, transitions), in chain order."""
+        import json
+
+        with self._lock:
+            rows = self._conn.execute("SELECT body FROM records WHERE decision_record_id = ? ORDER BY seq", (decision_record_id,)).fetchall()
+        return [json.loads(r["body"]) for r in rows]
+
     def latest_outcome(self, decision_record_id: str) -> Optional[Dict[str, Any]]:
         """The most recent outcome record linked to a decision, if any."""
         import json
@@ -268,6 +289,18 @@ class SQLiteStore:
                 (decision_record_id,),
             ).fetchone()
         return json.loads(row["body"]) if row else None
+
+    def erase_blob(self, content_hash: str) -> bool:
+        """Delete one sidecar entry: captured content and its salt (ADR 4). Never touches a record.
+
+        The signed record keeps its digest and still verifies; without the salt the digest can no
+        longer be linked to any value. Returns whether anything was erased.
+        """
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM evidence_blobs WHERE hash = ?", (content_hash,))
+        erased = cur.rowcount > 0
+        log.info("warrant store erase sidecar %s: %s", content_hash[:12], "erased" if erased else "nothing held")
+        return erased
 
     def streams(self) -> List[str]:
         with self._lock:

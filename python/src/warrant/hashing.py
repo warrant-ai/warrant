@@ -20,16 +20,31 @@ def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def content_hash(content: Any) -> str:
-    """Hash evidence content. Bytes are hashed as is, strings as UTF-8, anything else as canonical JSON."""
+def content_bytes(content: Any) -> bytes:
+    """The bytes a content hash covers: bytes as is, strings as UTF-8, anything else as canonical JSON."""
     if isinstance(content, (bytes, bytearray, memoryview)):
-        return sha256_hex(bytes(content))
+        return bytes(content)
     if isinstance(content, str):
-        return sha256_hex(content.encode("utf-8"))
+        return content.encode("utf-8")
     try:
-        return sha256_hex(canonical_json(content).encode("utf-8"))
+        return canonical_json(content).encode("utf-8")
     except (TypeError, ValueError) as exc:
         raise TypeError(f"evidence content must be bytes, str or JSON-serialisable, got {type(content).__name__}") from exc
+
+
+def content_hash(content: Any) -> str:
+    """Hash evidence content. Bytes are hashed as is, strings as UTF-8, anything else as canonical JSON."""
+    return sha256_hex(content_bytes(content))
+
+
+SALT_BYTES = 32
+
+
+def salted_hash(content: Any, salt: bytes) -> str:
+    """ADR 4: SHA-256(salt || content). A low-variety value cannot be recovered by trying every one."""
+    if not isinstance(salt, (bytes, bytearray)) or len(salt) != SALT_BYTES:
+        raise ValueError(f"salt must be {SALT_BYTES} bytes")
+    return sha256_hex(bytes(salt) + content_bytes(content))
 
 
 def record_hash(record: Mapping[str, Any], prev_hash: Optional[str]) -> str:

@@ -428,6 +428,59 @@ cd q2-pack && warrant verify records.jsonl
 
 A worked example with a deliberate calibration failure is in `examples/gallery/aml`.
 
+## Agent Decision Record: signed, warranted, attested
+
+The Agent Decision Record (ADR) is the open format these records follow: a record of one consequential decision and the evidence that authorised it, which a third party can verify offline without trusting the system that wrote it. The specification is `spec/adr-0.2.md` (CC BY 4.0). Everything below is optional; a record that uses none of it is an ordinary Warrant record.
+
+```
+pip install "warrantai[sign,policy]"
+warrant keys generate --issuer demo-bank --out keys/     # keys/demo-bank.key stays put; publish keys/demo-bank.keys.json
+```
+
+**Signing (level 1).** Give the store that seals records a key and every record carries the issuer's Ed25519 signature over its sealed hash: `Warrant(..., signing_key="keys/demo-bank.key")`, `warrant collector --signing-key`, or `$WARRANT_SIGNING_KEY`. A client that sends records to a collector does not sign; the collector does.
+
+**Obligations and the warrant (level 2).** The relying organisation's own policy says what has to be true, from which providers, and how fresh:
+
+```yaml
+# policies/CR-09.yaml
+enforce: true                        # acting without a warrant raises NotWarranted
+retention: {class: rbi-credit-8y, period: 2922d}
+obligations:
+  - {id: OB-1, requires: tool_call, name: bureau_pull, providers: [cibil, experian], max_age: 30d}
+  - {id: OB-2, requires: record, providers: [partner-data], max_age: 7d}
+  - {id: OB-3, requires: human_review, when: amount > 2500000}
+```
+
+```python
+with w.decide("credit.msme.approve", subject="LN-7731") as d:
+    d.check(amount=2_000_000, bureau_score=742)
+    d.evidence("bureau_pull", uri="cibil://req/55120", type="tool_call", provider="cibil",
+               content=bureau, retrieved_at=pulled_at)
+    d.cite(partner_record, keyring=Keyring.load("partner-data.keys.json"))   # the partner's signed record
+    d.commit("approve")          # warranted -> committed; otherwise NotWarranted, and the record says why
+```
+
+Seven rules decide whether an item counts: no self-attestation, qualified providers, freshness, a digest, cited parents that were warranted, the right type, and a named human linked by digest to exactly what they were shown. Each rejection is written onto the record with its reason, and the verdict (`proposed`, `pending_evidence`, `escalated`, `warranted`, `refused`, `committed`) is recomputed by any verifier. A later change of state is a new `transition` record: `w.transition(record_id, "warranted", decided_by="human:officer-7", reviewer="officer-7", shown=[digest])`. A transition can supply a person, never missing evidence.
+
+**Sensitive evidence.** `d.evidence(..., sensitive=True)` records a salted digest; the salt goes to the store's sidecar, never onto the record. `warrant erase --store ... --hash <digest>` deletes the sidecar entry: the record still verifies and the digest can no longer be linked to any value. `warrant evidence check --hash <digest> --file artefact.json --json --salt <hex>` shows an artefact produced a recorded digest.
+
+**Checkpoints and witnesses (level 3).** A checkpoint is the issuer's signed RFC 9162 Merkle root over a whole chain. A witness holds no records; it co-signs only a checkpoint provably consistent with the last one it signed, so an issuer that rewrote its own history cannot get a second signature:
+
+```
+warrant checkpoint create --store bank.db --stream lending --key keys/demo-bank.key --previous last.json -o cp.json
+warrant checkpoint cosign cp.json --key witness.key --keys demo-bank.keys.json --state witness-state/
+warrant checkpoint anchor cp.json          # optional: OpenTimestamps, pending until Bitcoin confirms
+warrant verify bank.jsonl --keys demo-bank.keys.json --keys partner-data.keys.json --keys witness.keys.json \
+    --parents partner.jsonl --checkpoint cp.json --require-level L3
+warrant trace 01M3GTSDHV4DC0D5AEMMVXR09W --export bank.jsonl --export partner.jsonl --keys ...
+```
+
+`warrant verify` reports the level each chain reaches and why it stops there. `warrant trace` walks a decision's parent links across organisations' exports and names the first step whose records show a problem. `warrant pack --keys ... --checkpoint ... --parents ...` ships the keys and checkpoints in the evidence pack and states its limits for the level reached.
+
+What this does not prove: a signature does not stop an issuer rewriting its own history before a witness saw it; locating a faulty step is not assigning liability; and whether a record is admissible in court needs a legal opinion. `examples/adr/run_adr.py` runs the whole flow with two organisations and a witness.
+
+The JavaScript SDK writes the same record fields and verifies signatures and Merkle proofs; obligations, the warrant and transitions are Python-only in this release.
+
 ## Production: the collector and PostgreSQL
 
 For a shared, self-hosted store, run the collector in front of PostgreSQL and point agents at it. The collector is stateless; run as many as you like behind a load balancer. Chaining is serialised per tenant and stream inside PostgreSQL.
@@ -525,6 +578,31 @@ class LoanApproval:
 ```
 
 `decide()` records the workflow's own decision through a local activity, so Temporal keeps its result in history and replay never writes it twice; it returns the verdict to branch on. Its ids come from `workflow.uuid4()`, so a call added to a running workflow shifts what follows: put new call sites behind `workflow.patched`. `escalation(exc)` reads the escalated decision out of the activity error (a denial is not an escalation; nobody can approve it). `approved()` runs the activity again with the reviewer's name attached: the verdict is appended as its own sealed record, linked to the escalated decision, before the activity runs, and the activity's record names the reviewer. Who the reviewer is comes from your own Update or Signal payload; Warrant records it and does not authenticate it. `rejected()` records a rejection, or a timed-out wait.
+
+## Laya: a decision model that runs inside your perimeter
+
+Laya is an open-weight decision model from Convai Innovations (Apache 2.0). It answers the same noul, choice and score questions as TypeSafe's Jev, but runs in your own process from weights on local disk, so the state it reads never leaves the host. Use it where customer data may not be sent to a model hosted elsewhere.
+
+```
+pip install "warrantai[laya]"
+```
+
+```python
+from warrant.adapters.laya import LayaAdapter, LayaModel
+
+model = LayaModel(revision="55cf4c4ebb4ebe31b2550e8bdf3bd21b99753851", subfolder="multilingual")
+adapter = LayaAdapter(w, model, residency={"aml.alert.disposition": "IN"})
+result = adapter.decide(decision_class="aml.alert.disposition", subject="alert:8812",
+                        state=alert, questions=registry.get("aml.alert", "3.1.0").questions)
+```
+
+- **Pin a commit.** `revision` must be a 40-character Hugging Face commit sha. The adapter downloads that exact commit and loads it from disk, because `laya.load` takes no revision and the branch moves when Convai publishes. Without a pin it refuses unless you pass `allow_unpinned=True`.
+- **The record names what answered.** Laya reports `laya-rl-agent` for every checkpoint and version. The record carries `laya@<sha[:12]>/<checkpoint>` instead, for example `laya@55cf4c4ebb4e/multilingual`.
+- **Confidence is the probability of the answer.** Laya's own `confidence` field is normalised entropy, not a probability. A choice records `probabilities[chosen]`, a noul records the winning side's probability, and a score records no confidence, as with Jev.
+- **Residency.** The endpoint is recorded as `local://laya?region=in-process`. In-process inference satisfies any `residency=` requirement, since nothing is sent.
+- **Train it first.** Out of the box Laya is close to random on unfamiliar questions; Convai's own guidance is to fine-tune and refit its temperature on your data. Measure it with `warrant calibrate` on your own outcomes before any clause routes on its confidence.
+
+Questions can be `warrant.questions.Question` objects, their dict form, or Laya's own `{type, instructions, criteria}` dicts. A malformed question is refused before a decision opens, and a model error records only its class, never its message.
 
 ## MCP: for agents you do not write the code for
 

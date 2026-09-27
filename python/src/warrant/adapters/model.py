@@ -32,6 +32,8 @@ log = logging.getLogger("warrant.adapters.model")
 
 PERSIST_MODES = ("sync", "async")
 UNAVAILABLE_MODES = ("open", "closed")
+#: The region a model reports when inference runs in the caller's own process.
+IN_PROCESS = "in-process"
 
 
 class ResidencyError(RuntimeError):
@@ -175,7 +177,9 @@ class DecisionAdapter:
         if required is None:
             return
         actual = getattr(self._model, "region", "unknown")
-        if actual != required:
+        # A model that runs in this process never sends the state anywhere, so it is wherever the
+        # caller already is and satisfies any region a class can require.
+        if actual != required and actual != IN_PROCESS:
             raise ResidencyError(
                 f"{decision_class} requires inference in region {required!r}, but "
                 f"{self._model.endpoint} serves {actual!r}. Nothing was sent."

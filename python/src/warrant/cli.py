@@ -60,26 +60,47 @@ def _read_jsonl(path: str):
 
 
 def _cmd_verify(args: argparse.Namespace) -> int:
+    from warrant.verify import level_at_least
+
     try:
-        reports = verify_records(_read_jsonl(args.file))
-    except FileNotFoundError:
-        print(f"{args.file}: file not found", file=sys.stderr)
+        keyring = None
+        if args.keys:
+            from warrant.signing import Keyring
+
+            keyring = Keyring.load(*args.keys)
+        parents = [r for path in (args.parents or []) for r in _read_jsonl(path)]
+        checkpoints = []
+        for path in args.checkpoint or []:
+            with open(path, "r", encoding="utf-8") as fh:
+                checkpoints.append(json.load(fh))
+        reports = verify_records(_read_jsonl(args.file), keyring=keyring, parent_records=parents, checkpoints=checkpoints)
+    except FileNotFoundError as exc:
+        print(f"{exc.filename or args.file}: file not found", file=sys.stderr)
+        return 1
+    except ImportError as exc:
+        print(str(exc), file=sys.stderr)
         return 1
     except ValueError as exc:
-        print(f"{args.file}: invalid JSONL: {exc}", file=sys.stderr)
+        print(f"{args.file}: invalid JSONL or key set: {exc}", file=sys.stderr)
         return 1
     if not reports:
         print(f"{args.file}: no records")
         return 1
     failed = 0
     for report in reports:
+        level = f", {report.level}" + (f" ({report.level_reason})" if report.level_reason and (keyring or args.require_level) else "")
         if report.ok:
-            print(f"{report.stream}: {report.records} record(s), chain OK")
+            print(f"{report.stream}: {report.records} record(s), chain OK{level if keyring or args.require_level else ''}")
         else:
             failed += 1
             print(f"{report.stream}: {report.records} record(s), FAILED", file=sys.stderr)
             for message in report.errors:
                 print(f"  {message}", file=sys.stderr)
+        for message in report.warnings:
+            print(f"  note: {message}")
+        if args.require_level and report.ok and not level_at_least(report.level, args.require_level):
+            failed += 1
+            print(f"  required {args.require_level}, reached {report.level}", file=sys.stderr)
     return 1 if failed else 0
 
 
@@ -379,7 +400,7 @@ def _cmd_collector(args: argparse.Namespace) -> int:
         return 2
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
-        serve(args.store, listen=args.listen, tokens=tokens, insecure=args.insecure)
+        serve(args.store, listen=args.listen, tokens=tokens, insecure=args.insecure, signing_key=args.signing_key)
     except Exception as exc:
         print(f"collector failed: {exc}", file=sys.stderr)
         return 1
@@ -524,8 +545,11 @@ def _cmd_pack(args: argparse.Namespace) -> int:
             by=args.by,
             where=args.where,
             title=args.title,
+            keys=[Path(k) for k in args.keys or []],
+            checkpoints=[Path(c) for c in args.checkpoint or []],
+            parents=[Path(p) for p in args.parents or []],
         )
-    except (PackError, CalibrationError, ImportError) as exc:
+    except (PackError, CalibrationError, ImportError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
     except OSError as exc:
@@ -653,6 +677,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     ver = sub.add_parser("verify", help="verify the hash chain of an exported JSONL file, offline")
     ver.add_argument("file", metavar="FILE")
+    ver.add_argument("--keys", action="append", metavar="FILE", help="issuer public key set(s); checks signatures")
+    ver.add_argument("--parents", action="append", metavar="FILE", help="exports holding upstream records this chain cites")
+    ver.add_argument("--checkpoint", action="append", metavar="FILE", help="checkpoint(s) to check the chain head against")
+    ver.add_argument("--require-level", choices=("L1", "L2", "L3"), help="fail unless every chain reaches this ADR level")
     ver.set_defaults(func=_cmd_verify)
 
     exp = sub.add_parser("export", help="export sealed records from a local store as JSONL")
@@ -759,6 +787,9 @@ def build_parser() -> argparse.ArgumentParser:
     pk.add_argument("--by", metavar="DIM", help="break the curve down by class, question_set, route or inputs.<field>")
     pk.add_argument("--where", metavar="CEL", help="restrict the curve to these decisions, e.g. \"decision.route == 'auto'\"")
     pk.add_argument("--title", metavar="TEXT", help="heading for the front page")
+    pk.add_argument("--keys", action="append", metavar="FILE", help="issuer and witness key sets; checks signatures and ships them in the pack")
+    pk.add_argument("--checkpoint", action="append", metavar="FILE", help="checkpoint(s) covering the chain")
+    pk.add_argument("--parents", action="append", metavar="FILE", help="exports of upstream records the chain cites")
     pk.set_defaults(func=_cmd_pack)
 
     qs = sub.add_parser("questions", help="question sets: the questions a decision was made by answering, versioned")
@@ -804,7 +835,12 @@ def build_parser() -> argparse.ArgumentParser:
     co.add_argument("--listen", default="127.0.0.1:8787", metavar="HOST:PORT")
     co.add_argument("--token", action="append", metavar="TENANT:TOKEN", help="bearer token per tenant (repeatable); or WARRANT_COLLECTOR_TOKENS")
     co.add_argument("--insecure", action="store_true", help="no authentication; local development only")
+    co.add_argument("--signing-key", default=None, metavar="FILE", help="issuer key to sign every sealed record (default $WARRANT_SIGNING_KEY)")
     co.set_defaults(func=_cmd_collector)
+
+    from warrant.cli_adr import add_parsers
+
+    add_parsers(sub)
 
     mc = sub.add_parser("mcp", help="run an MCP server over stdio so an MCP-capable agent can query its mandate and record decisions")
     mc.add_argument("--stream", required=True, metavar="NAME")

@@ -24,14 +24,34 @@ export function sha256Hex(data) {
   return createHash("sha256").update(data).digest("hex");
 }
 
-/** Hash evidence content. Bytes are hashed as is, strings as UTF-8, anything else as canonical JSON. */
-export function contentHash(content) {
-  if (content instanceof Uint8Array) return sha256Hex(content);
-  if (content instanceof ArrayBuffer) return sha256Hex(new Uint8Array(content));
-  if (typeof content === "string") return sha256Hex(Buffer.from(content, "utf8"));
+/** The bytes a content hash covers: bytes as is, strings as UTF-8, anything else as canonical JSON. */
+export function contentBytes(content) {
+  if (content instanceof Uint8Array) return Buffer.from(content);
+  if (content instanceof ArrayBuffer) return Buffer.from(new Uint8Array(content));
+  if (typeof content === "string") return Buffer.from(content, "utf8");
   try {
-    return sha256Hex(Buffer.from(canonicalJson(content), "utf8"));
+    return Buffer.from(canonicalJson(content), "utf8");
   } catch (err) {
     throw new TypeError(`evidence content must be bytes, a string or JSON-serialisable: ${err.message}`);
   }
+}
+
+/** Hash evidence content. Bytes are hashed as is, strings as UTF-8, anything else as canonical JSON. */
+export function contentHash(content) {
+  return sha256Hex(contentBytes(content));
+}
+
+export const SALT_BYTES = 32;
+
+/** ADR 4: SHA-256(salt || content). A low-variety value cannot be recovered by trying every one. */
+export function saltedHash(content, salt) {
+  if (!(salt instanceof Uint8Array) || salt.length !== SALT_BYTES) throw new RangeError(`salt must be ${SALT_BYTES} bytes`);
+  return sha256Hex(Buffer.concat([Buffer.from(salt), contentBytes(content)]));
+}
+
+/** Hash of a record body (every field but `seal`) chained to `prevHash`, as the store seals it. */
+export function recordHash(record, prevHash) {
+  const body = {};
+  for (const key of Object.keys(record)) if (key !== "seal") body[key] = record[key];
+  return sha256Hex(Buffer.from(`${canonicalJson(body)}\n${prevHash ?? ""}`, "utf8"));
 }

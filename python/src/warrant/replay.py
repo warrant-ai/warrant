@@ -158,6 +158,8 @@ class _ReplayClient:
         self.redactor = None
         self.capture_inputs = False
         self.capture_evidence = False
+        # Client-wide enforcement is off; a policy that sets enforce still applies through its verdict.
+        self.enforce = False
         self.records: List[Dict[str, Any]] = []
 
     def _submit(self, record: Dict[str, Any]) -> None:

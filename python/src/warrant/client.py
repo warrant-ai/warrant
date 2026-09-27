@@ -12,10 +12,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Sequence, Type, Union
+from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Sequence, Tuple, Type, Union
 
 from warrant.emit import Emitter, Sink
-from warrant.hashing import content_hash
+from warrant.hashing import SALT_BYTES, content_hash, record_hash, salted_hash
 from warrant.ids import ULID_RE, ulid
 from warrant.redaction import Redactor
 from warrant.schema import SCHEMA_VERSION, ValidationError, validate
@@ -29,7 +29,7 @@ log = logging.getLogger("warrant")
 _CLASS_RE = re.compile(r"^[a-z0-9_]+(\.[a-z0-9_]+)*$")
 _CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 _SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
-EVIDENCE_TYPES = ("model_call", "tool_call", "document", "web", "other")
+EVIDENCE_TYPES = ("model_call", "tool_call", "document", "web", "other", "record", "mandate", "attestation", "human_review")
 MANDATE_RESULTS = ("allow", "deny", "escalate", "unchecked")
 HUMAN_VERDICTS = ("approve", "reject", "amend")
 
@@ -38,6 +38,37 @@ _current: "contextvars.ContextVar[Optional[Decision]]" = contextvars.ContextVar(
 
 class Unreplayable(Exception):
     """Frozen replay could not serve a tool call from recorded evidence."""
+
+
+class NotWarranted(RuntimeError):
+    """A decision tried to act without a warrant: fail closed (ADR level 2).
+
+    ``state`` is the lifecycle state it reached instead, and ``unmet`` the verifiable obligations
+    no admitted evidence satisfied.
+    """
+
+    def __init__(self, record_id: str, state: Optional[str], unmet: Sequence[str]) -> None:
+        self.record_id, self.state, self.unmet = record_id, state, list(unmet)
+        detail = f"; unmet: {', '.join(unmet)}" if unmet else ""
+        super().__init__(f"decision {record_id} is {state or 'not assessed'}, not warranted{detail}")
+
+
+class CitationError(ValueError):
+    """An upstream record could not be cited: unsealed, altered, or its signature does not verify."""
+
+
+@dataclass(frozen=True)
+class WarrantState:
+    """What :meth:`Decision.warrant` found: the state reached and why."""
+
+    state: Optional[str]
+    met: Tuple[str, ...]
+    unmet: Tuple[str, ...]
+    rejected: Tuple[Tuple[str, str], ...]
+
+    @property
+    def warranted(self) -> bool:
+        return self.state in ("warranted", "committed")
 
 
 class ReplaySource(Protocol):
@@ -104,6 +135,9 @@ class Verdict:
     clause: Optional[str] = None
     reason: Optional[str] = None
     flagged: bool = False
+    obligations: Tuple[Dict[str, Any], ...] = ()
+    enforce: bool = False
+    retention: Optional[Dict[str, Any]] = None
 
     def __post_init__(self) -> None:
         if self.result not in MANDATE_RESULTS:
@@ -124,9 +158,15 @@ class PolicyEngine(Protocol):
 
 @dataclass(frozen=True)
 class AgentInfo:
+    """Who is acting. ``identity`` is ``(registry, id)`` or ``(registry, id, uri)`` in a registry the
+    relying party recognises."""
+
     name: str
     version: str
     instance: Optional[str] = None
+    model: Optional[str] = None
+    runtime: Optional[str] = None
+    identity: Optional[Tuple[str, ...]] = None
 
 
 class Decision:
@@ -174,6 +214,11 @@ class Decision:
         self._state_ref: Optional[str] = None
         self._route: Optional[str] = None
         self._blobs: Dict[str, Dict[str, Any]] = {}
+        self._claims: List[Dict[str, Any]] = []
+        self._parents: List[Dict[str, Any]] = []
+        self._obligations: List[Dict[str, Any]] = []
+        self._retention: Optional[Dict[str, Any]] = None
+        self._warrant_at: Optional[str] = None
         self._replay_source = replay_source
         self._token: Optional[contextvars.Token] = None
         self._closed = False
@@ -195,6 +240,12 @@ class Decision:
                 self._verdict = engine.evaluate(self.decision_class, inputs, at=self._opened_at)
             except TypeError:
                 self._verdict = engine.evaluate(self.decision_class, inputs)  # older engine
+        known = {o["id"] for o in self._obligations}
+        for ob in self._verdict.obligations:
+            if ob["id"] not in known:
+                self._obligations.append(dict(ob))
+        if self._verdict.retention and self._retention is None:
+            self._apply_policy_retention(self._verdict.retention)
         return self._verdict
 
     def set_inputs(self, inputs: Mapping[str, Any]) -> None:
@@ -250,8 +301,17 @@ class Decision:
         content_hash: Optional[str] = None,
         excerpt: Optional[str] = None,
         retrieved_at: Union[str, datetime, None] = None,
+        provider: Optional[str] = None,
+        obligation: Optional[str] = None,
+        sensitive: bool = False,
     ) -> str:
-        """Attach evidence by reference. Content is hashed here and never stored. Returns the hash."""
+        """Attach evidence by reference. Content is hashed here and never stored. Returns the hash.
+
+        ``provider`` names who produced it; the acting agent's own evidence is never admitted for its
+        own obligation. ``obligation`` is the obligation id it is offered against. ``sensitive``
+        uses a salted digest (ADR 4): the salt goes to the store's sidecar, never onto the record,
+        so erasing the sidecar entry unlinks the digest from the data while the record still verifies.
+        """
         self._assert_open()
         if not isinstance(name, str) or not name:
             raise ValueError("evidence name must be a non-empty string")
@@ -263,8 +323,32 @@ class Decision:
             raise ValueError("evidence needs either content (hashed locally) or content_hash")
         if content_hash is not None and not _SHA256_RE.match(content_hash):
             raise ValueError("content_hash must be 64 lowercase hex characters (sha256)")
-        digest = content_hash if content_hash is not None else _hash_content(content)
+        if provider is not None and (not isinstance(provider, str) or not provider):
+            raise ValueError("provider must be a non-empty string")
+        if obligation is not None and (not isinstance(obligation, str) or not obligation):
+            raise ValueError("obligation must be a non-empty string")
+        if sensitive:
+            if content is None:
+                raise ValueError("sensitive evidence needs its content: a salted digest cannot be made from a bare hash")
+            if excerpt is not None:
+                raise ValueError("sensitive evidence cannot carry an excerpt; the excerpt would be the personal data in clear")
+            salt = os.urandom(SALT_BYTES)
+            try:
+                digest = salted_hash(content, salt)
+            except TypeError as exc:
+                raise ValueError(str(exc)) from exc
+            sidecar = encode_blob(content) if self._client.capture_evidence else {}
+            sidecar["salt"] = salt.hex()
+            self._blobs[digest] = sidecar
+        else:
+            digest = content_hash if content_hash is not None else _hash_content(content)
         item: Dict[str, Any] = {"name": name, "type": type, "uri": uri, "content_hash": digest}
+        if sensitive:
+            item["salted"] = True
+        if provider is not None:
+            item["provider"] = provider
+        if obligation is not None:
+            item["obligation"] = obligation
         if retrieved_at is not None:
             item["retrieved_at"] = _as_timestamp(retrieved_at)
         if excerpt is not None:
@@ -273,6 +357,181 @@ class Decision:
             item["excerpt"] = excerpt
         self._evidence.append(item)
         return digest
+
+    def salt_for(self, digest: str) -> Optional[str]:
+        """The hex salt behind a sensitive item's digest, for a caller that keeps its own sidecar."""
+        return (self._blobs.get(digest) or {}).get("salt")
+
+    # -- ADR: claims, handoffs, obligations, the warrant ----------------------
+
+    def claim(self, claim: str, value: Any = None) -> None:
+        """Record what the agent asserts. A claim is never evidence, here or downstream (ADR 1.2)."""
+        self._assert_open()
+        if not isinstance(claim, str) or not claim:
+            raise ValueError("claim must be a non-empty string")
+        try:
+            json.dumps(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"claim value must be JSON-serialisable: {exc}") from exc
+        item: Dict[str, Any] = {"claim": claim}
+        if value is not None:
+            item["value"] = value
+        self._claims.append(item)
+
+    def cite(
+        self,
+        parent: Mapping[str, Any],
+        *,
+        keyring: Any = None,
+        name: Optional[str] = None,
+        obligation: Optional[str] = None,
+        state: Optional[str] = None,
+    ) -> str:
+        """Rely on an upstream agent's sealed record, possibly another organisation's (ADR rule 5).
+
+        The parent is cited by id and sealed hash; its claims are not copied and never become
+        evidence. With ``keyring`` the parent's issuer signature must verify, and the issuer's name
+        comes from the key set. ``state`` overrides the parent's own ``verdict.state`` when a later
+        transition moved it. Returns the cited hash.
+        """
+        self._assert_open()
+        seal = parent.get("seal") if isinstance(parent, Mapping) else None
+        if not isinstance(seal, Mapping) or not seal.get("hash"):
+            raise CitationError("the parent is not sealed; cite a record exported from its issuer's store")
+        if record_hash(parent, seal.get("prev_hash")) != seal["hash"]:
+            raise CitationError(f"parent {parent.get('record_id')} does not match its own seal; it was altered")
+        issuer = parent.get("tenant")
+        key_id = seal.get("key_id")
+        if keyring is not None:
+            from warrant.signing import verify_seal
+
+            ok, detail = verify_seal(parent, keyring)
+            if not ok:
+                raise CitationError(f"parent {parent.get('record_id')}: {detail}")
+            issuer = detail
+        cited_state = state or (parent.get("verdict") or {}).get("state")
+        entry: Dict[str, Any] = {"record_id": parent["record_id"], "hash": seal["hash"]}
+        if issuer:
+            entry["issuer"] = issuer
+        if key_id:
+            entry["key_id"] = key_id
+        if cited_state:
+            entry["state"] = cited_state
+        self._parents.append(entry)
+        self.evidence(
+            name or f"{issuer or 'upstream'}:{(parent.get('decision') or {}).get('class', 'record')}",
+            uri=f"adr://{issuer or 'unknown'}/{parent['record_id']}#{seal['hash']}",
+            type="record",
+            content_hash=seal["hash"],
+            # Only a verified signature names a provider. An unauthenticated citation is recorded,
+            # but without a provider it counts as the agent's own say-so and cannot authorise.
+            provider=issuer if keyring is not None else None,
+            obligation=obligation,
+            retrieved_at=parent.get("timestamp"),
+        )
+        self._evidence[-1]["parent"] = {k: v for k, v in (("record_id", parent["record_id"]), ("hash", seal["hash"]), ("issuer", issuer)) if v}
+        return seal["hash"]
+
+    def obligation(
+        self,
+        obligation_id: str,
+        *,
+        requires: str,
+        kind: str = "verifiable",
+        providers: Sequence[str] = (),
+        max_age_seconds: Optional[int] = None,
+        name: Optional[str] = None,
+        clause: Optional[str] = None,
+    ) -> None:
+        """Declare an obligation by hand. Policy bundles normally supply these through ``check()``."""
+        self._assert_open()
+        if not isinstance(obligation_id, str) or not obligation_id:
+            raise ValueError("obligation id must be a non-empty string")
+        if any(o["id"] == obligation_id for o in self._obligations):
+            raise ValueError(f"obligation {obligation_id!r} is already declared")
+        if requires not in EVIDENCE_TYPES:
+            raise ValueError(f"requires must be one of {EVIDENCE_TYPES}, got {requires!r}")
+        if kind not in ("verifiable", "advisory"):
+            raise ValueError("kind must be verifiable or advisory")
+        if "self" in providers:
+            raise ValueError("'self' cannot be a qualified provider")
+        if max_age_seconds is not None and (not isinstance(max_age_seconds, int) or isinstance(max_age_seconds, bool) or max_age_seconds < 0):
+            raise ValueError("max_age_seconds must be a non-negative integer")
+        ob: Dict[str, Any] = {"id": obligation_id, "requires": requires, "kind": kind}
+        if providers:
+            ob["providers"] = list(providers)
+        for key, value in (("max_age_seconds", max_age_seconds), ("name", name), ("clause", clause)):
+            if value is not None:
+                ob[key] = value
+        self._obligations.append(ob)
+
+    def warrant(self) -> WarrantState:
+        """Apply the admissibility rules to the evidence so far and report the state reached."""
+        self._assert_open()
+        from warrant.admissibility import assess
+
+        self._warrant_at = _now()
+        self._auto_offer()
+        draft = self._draft(status="withheld")
+        assessment = assess(draft, at=self._warrant_at)
+        rejected = tuple(
+            (draft["evidence"][i].get("name", str(i)), a.get("reason", ""))
+            for i, a in sorted(assessment.admissions.items()) if a["status"] == "rejected"
+        )
+        return WarrantState(assessment.state, tuple(assessment.met), tuple(assessment.unmet), rejected)
+
+    def commit(
+        self,
+        action: str,
+        *,
+        summary: Optional[str] = None,
+        cost_centre: Optional[str] = None,
+        alternatives: Optional[Sequence[str]] = None,
+        route: Optional[str] = None,
+    ) -> None:
+        """Act only on a warrant. Raises :class:`NotWarranted` instead of recording the action."""
+        state = self.warrant()
+        if not state.warranted:
+            raise NotWarranted(self.record_id, state.state, state.unmet)
+        self._act(action, summary=summary, cost_centre=cost_centre, alternatives=alternatives, route=route)
+
+    def retention(self, retention_class: str, *, retain_until: Union[str, datetime, None] = None, legal_hold: bool = False) -> None:
+        """Record the retention duty this decision falls under (ADR 1). The store never deletes."""
+        self._assert_open()
+        if not isinstance(retention_class, str) or not retention_class:
+            raise ValueError("retention class must be a non-empty string")
+        item: Dict[str, Any] = {"class": retention_class}
+        if retain_until is not None:
+            item["retain_until"] = _as_timestamp(retain_until)
+        if legal_hold:
+            item["legal_hold"] = True
+        self._retention = item
+
+    def _apply_policy_retention(self, policy_retention: Mapping[str, Any]) -> None:
+        item: Dict[str, Any] = {"class": policy_retention["class"]}
+        seconds = policy_retention.get("seconds")
+        if seconds:
+            from datetime import timedelta
+
+            opened = datetime.fromisoformat(self._opened_at.replace("Z", "+00:00"))
+            item["retain_until"] = _as_timestamp(opened + timedelta(seconds=seconds))
+        self._retention = item
+
+    def _auto_offer(self) -> None:
+        """Offer an unassigned item to the one obligation it can only be meant for.
+
+        Matching is by the obligation's ``name`` first, then by type when exactly one obligation
+        requires that type. The assignment is written onto the record, so the verifier judges the
+        same pairing the issuer did.
+        """
+        for item in self._evidence:
+            if "obligation" in item or item.get("type") == "model_call":
+                continue
+            by_name = [o for o in self._obligations if o.get("name") and o["name"] == item["name"]]
+            by_type = [o for o in self._obligations if not o.get("name") and o["requires"] == item["type"]]
+            match = by_name if by_name else by_type
+            if len(match) == 1:
+                item["obligation"] = match[0]["id"]
 
     def model_call(
         self,
@@ -428,7 +687,28 @@ class Decision:
 
         ``route`` says where the policy sent this decision — ``auto``, ``human``, ``model`` or
         ``deferred`` — which is a different question from ``action``, what was decided.
+
+        Where the policy for this class sets ``enforce: true``, or the client was created with
+        ``enforce=True``, acting without a warrant raises :class:`NotWarranted` (fail closed).
         """
+        if self._enforced():
+            state = self.warrant()
+            if not state.warranted:
+                raise NotWarranted(self.record_id, state.state, state.unmet)
+        self._act(action, summary=summary, cost_centre=cost_centre, alternatives=alternatives, route=route)
+
+    def _enforced(self) -> bool:
+        return bool(self._client.enforce or (self._verdict is not None and self._verdict.enforce))
+
+    def _act(
+        self,
+        action: str,
+        *,
+        summary: Optional[str] = None,
+        cost_centre: Optional[str] = None,
+        alternatives: Optional[Sequence[str]] = None,
+        route: Optional[str] = None,
+    ) -> None:
         self._assert_open()
         if not isinstance(action, str) or not action:
             raise ValueError("action must be a non-empty string")
@@ -492,8 +772,26 @@ class Decision:
         if self._closed:
             raise RuntimeError(f"decision {self.record_id} is closed")
 
+    def _attach_verdict(self, record: Dict[str, Any], verdict: Verdict) -> None:
+        """Obligations with met/unmet, admissions on the evidence, and the verdict (ADR 1.4, 2, 3)."""
+        from warrant.admissibility import assess
+
+        record["obligations"] = [dict(o) for o in self._obligations]
+        at = self._warrant_at or _now()
+        record["verdict"] = {"state": "proposed", "at": at}
+        assessment = assess(record, at=at)
+        record["obligations"] = assessment.obligations
+        for index, admission in assessment.admissions.items():
+            record["evidence"][index]["admission"] = admission
+        verdict_out: Dict[str, Any] = {"state": assessment.state or "proposed", "decided_by": _decided_by(verdict), "at": at}
+        if assessment.met:
+            verdict_out["met"] = assessment.met
+        if assessment.unmet:
+            verdict_out["unmet"] = assessment.unmet
+        verdict_out["history"] = [{"state": s, "at": at} for s in assessment.history]
+        record["verdict"] = verdict_out
+
     def _build(self, exc: Optional[BaseException]) -> Dict[str, Any]:
-        client = self._client
         if exc is not None:
             status = "failed"
             action = self._action or "none"
@@ -506,7 +804,16 @@ class Decision:
             status = "withheld"
             action = "none"
             summary = self._summary or ("withheld: mandate result was " + self._verdict.result if self._verdict else "withheld")
+        if self._obligations:
+            self._auto_offer()
+        return self._compose(status, action, summary, final=True)
 
+    def _draft(self, *, status: str) -> Dict[str, Any]:
+        """The record as it would be if the scope closed now without acting. For ``warrant()``."""
+        return self._compose(status, self._action or "none", self._summary, final=False)
+
+    def _compose(self, status: str, action: str, summary: Optional[str], *, final: bool) -> Dict[str, Any]:
+        client = self._client
         decision: Dict[str, Any] = {"class": self.decision_class, "action": action, "subject": self.subject, "status": status}
         if summary:
             decision["summary"] = summary
@@ -524,6 +831,8 @@ class Decision:
             decision["state_ref"] = self._state_ref
         if self._answers:
             decision["answers"] = list(self._answers)
+        if self._claims:
+            decision["claims"] = list(self._claims)
 
         verdict = self._verdict or Verdict("unchecked")
         mandate: Dict[str, Any] = {"result": verdict.result}
@@ -537,6 +846,15 @@ class Decision:
         actor: Dict[str, Any] = {"name": client.agent.name, "version": client.agent.version}
         if client.agent.instance:
             actor["instance"] = client.agent.instance
+        if client.agent.model:
+            actor["model"] = client.agent.model
+        if client.agent.runtime:
+            actor["runtime"] = client.agent.runtime
+        if client.agent.identity:
+            registry, identity_id, *rest = client.agent.identity
+            actor["identity"] = {"registry": registry, "id": identity_id}
+            if rest and rest[0]:
+                actor["identity"]["uri"] = rest[0]
         on_behalf_of = self._on_behalf_of or client.on_behalf_of
         if on_behalf_of:
             actor["on_behalf_of"] = on_behalf_of
@@ -558,16 +876,30 @@ class Decision:
             "actor": actor,
             "decision": decision,
             "mandate": mandate,
-            "evidence": self._evidence,
-            "human": self._human,
+            "evidence": [dict(e) for e in self._evidence],
+            "human": dict(self._human),
             "cost": cost,
             "outcome": {"status": "pending"},
         }
+        if self._parents:
+            record["parents"] = [dict(p) for p in self._parents]
+        if self._retention:
+            record["retention"] = dict(self._retention)
+        if self._obligations or self._warrant_at:
+            self._attach_verdict(record, verdict)
+        if not final:
+            return record
         if client.redactor:
             record = client.redactor.apply(record)
         if self._blobs:
             record["_blobs"] = self._blobs
         return record
+
+
+def _decided_by(verdict: Verdict) -> str:
+    if verdict.policy_id:
+        return f"policy:{verdict.policy_id}@{verdict.policy_version}"
+    return "rules:adr/0.2"
 
 
 def _hash_content(content: Any) -> str:
@@ -609,6 +941,8 @@ class Warrant:
         capture_inputs: bool = False,
         capture_evidence: bool = False,
         spill_dir: Union[str, Path, None] = None,
+        signing_key: Any = None,
+        enforce: bool = False,
         max_queue: int = 10_000,
         batch_size: int = 200,
         flush_interval: float = 0.2,
@@ -632,6 +966,10 @@ class Warrant:
         self.redactor = redact
         self.capture_inputs = capture_inputs
         self.capture_evidence = capture_evidence
+        self.enforce = enforce
+        from warrant.signing import resolve_signing_key
+
+        signer = resolve_signing_key(signing_key)
 
         if store is None or isinstance(store, (str, Path)):
             target = str(store or os.environ.get("WARRANT_STORE") or ".warrant/records.db")
@@ -645,18 +983,23 @@ class Warrant:
             elif target.startswith(("postgres://", "postgresql://")):
                 from warrant.store import open_store
 
-                self._store = open_store(target)
+                self._store = open_store(target, signer=signer)
                 sink = self._store
                 default_spill = Path(".warrant/spill")
             else:
                 path = Path(target)
-                self._store = SQLiteStore(path)
+                self._store = SQLiteStore(path, signer=signer)
                 sink = self._store
                 default_spill = path.parent / "spill"
         else:
             self._store = store if isinstance(store, SQLiteStore) else None
             sink = store
             default_spill = Path(".warrant/spill")
+        if signer is not None and self._store is None:
+            raise ValueError(
+                "signing_key signs where records are sealed: pass it to the collector or store that seals them "
+                "(warrant collector --signing-key), not to a client that sends records elsewhere"
+            )
         self._emitter = Emitter(
             sink,
             Path(spill_dir) if spill_dir else default_spill,
@@ -734,6 +1077,69 @@ class Warrant:
             human["note"] = note
         return self._append_linked("human_verdict", target, {"human": human}, record_id=record_id)
 
+    def transition(
+        self,
+        decision_record_id: str,
+        to_state: str,
+        *,
+        decided_by: str,
+        from_state: Optional[str] = None,
+        reviewer: Optional[str] = None,
+        shown: Optional[Sequence[str]] = None,
+        reason: Optional[str] = None,
+        record_id: Optional[str] = None,
+    ) -> str:
+        """Append a lifecycle transition for an earlier decision (ADR 3). History is never edited.
+
+        ``from_state`` is read from the store when one is local; a client recording to a collector
+        must pass it. Leaving ``escalated`` for ``warranted`` needs a named ``reviewer`` and the
+        digests they were ``shown`` (rule 7). ``committed`` is reachable only from ``warranted``.
+        """
+        from warrant.admissibility import STATES, check_transition, legal
+
+        if to_state not in STATES:
+            raise ValueError(f"to_state must be one of {STATES}, got {to_state!r}")
+        if not isinstance(decided_by, str) or not decided_by:
+            raise ValueError("decided_by must name who decided, e.g. human:a.rao or policy:CR-07@2026.4")
+        if record_id is not None and not (isinstance(record_id, str) and ULID_RE.match(record_id)):
+            raise ValueError(f"record_id must be a 26-character ULID, got {record_id!r}")
+        decision = None
+        if self._store is not None:
+            self._emitter.flush()
+            decision = self._store.get(decision_record_id)
+            if decision is None:
+                raise LookupError(f"no decision {decision_record_id} in the store")
+            current = current_state(self._store, decision)
+            if from_state is not None and from_state != current:
+                raise ValueError(f"decision {decision_record_id} is {current}, not {from_state}")
+            from_state = current
+        if from_state is None:
+            raise ValueError("pass from_state: there is no local store to read the current state from")
+        if not legal(from_state, to_state):
+            raise ValueError(f"illegal transition {from_state} -> {to_state}")
+        human: Optional[Dict[str, Any]] = None
+        if reviewer is not None or shown is not None:
+            if not isinstance(reviewer, str) or not reviewer:
+                raise ValueError("a human transition needs the reviewer's name")
+            shown_list = list(shown or [])
+            if any(not isinstance(d, str) or not SHA256_RE.match(d) for d in shown_list):
+                raise ValueError("shown must be sha256 digests of the material the reviewer saw")
+            human = {"required": True, "reviewer": reviewer, "shown": shown_list, "at": _now(),
+                     "verdict": "reject" if to_state == "refused" else "approve"}
+        verdict: Dict[str, Any] = {"state": to_state, "from_state": from_state, "decided_by": decided_by, "at": _now()}
+        if reason:
+            verdict["reason"] = reason
+        section: Dict[str, Any] = {"verdict": verdict}
+        if human is not None:
+            section["human"] = human
+        if decision is not None:
+            problem = check_transition(decision, from_state, section)
+            if problem:
+                raise ValueError(problem)
+        elif to_state == "warranted" and from_state == "escalated" and human is None:
+            raise ValueError("leaving escalated for warranted needs a named reviewer and the digests they were shown")
+        return self._append_linked("transition", decision_record_id, section, record_id=record_id)
+
     def _resolve(self, subject: Optional[str], decision_record_id: Optional[str]) -> str:
         if decision_record_id:
             return decision_record_id
@@ -792,6 +1198,15 @@ class Warrant:
 
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
+
+
+def current_state(store: Any, decision: Mapping[str, Any]) -> str:
+    """A decision's lifecycle state now: its own verdict, advanced by any later transition records."""
+    state = (decision.get("verdict") or {}).get("state") or "proposed"
+    for linked in store.linked(decision["record_id"]):
+        if linked.get("record_type") == "transition":
+            state = (linked.get("verdict") or {}).get("state", state)
+    return state
 
 
 _warned_default_agent = False

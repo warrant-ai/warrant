@@ -24,7 +24,8 @@
         "decision",
         "outcome",
         "human_verdict",
-        "correction"
+        "correction",
+        "transition"
       ]
     },
     "tenant": {
@@ -89,6 +90,36 @@
         "on_behalf_of": {
           "type": "string",
           "description": "The human or system principal the agent acts for."
+        },
+        "model": {
+          "type": "string",
+          "description": "Model the agent ran on, as the runtime reported it."
+        },
+        "runtime": {
+          "type": "string",
+          "description": "Agent runtime or framework, e.g. temporal, langgraph."
+        },
+        "identity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "registry",
+            "id"
+          ],
+          "description": "The agent's entry in an external registry the relying party recognises (ADR 1.1).",
+          "properties": {
+            "registry": {
+              "type": "string",
+              "minLength": 1
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uri": {
+              "type": "string"
+            }
+          }
         }
       }
     },
@@ -244,6 +275,24 @@
               }
             }
           }
+        },
+        "claims": {
+          "type": "array",
+          "description": "What the agent asserts. Never evidence (ADR 1.2).",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "claim"
+            ],
+            "properties": {
+              "claim": {
+                "type": "string",
+                "minLength": 1
+              },
+              "value": {}
+            }
+          }
         }
       }
     },
@@ -305,7 +354,11 @@
               "tool_call",
               "document",
               "web",
-              "other"
+              "other",
+              "record",
+              "mandate",
+              "attestation",
+              "human_review"
             ]
           },
           "uri": {
@@ -322,6 +375,58 @@
           "excerpt": {
             "type": "string",
             "description": "Opt-in, redacted before leaving the process."
+          },
+          "provider": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Who produced the item. 'self' or the actor's own name marks it self-attested."
+          },
+          "obligation": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Obligation id this item is offered against. Absent for inputs."
+          },
+          "admission": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "status"
+            ],
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": [
+                  "admitted",
+                  "rejected"
+                ]
+              },
+              "reason": {
+                "type": "string"
+              }
+            }
+          },
+          "salted": {
+            "type": "boolean",
+            "description": "content_hash is SHA-256(salt || content); the salt lives in the issuer's sidecar (ADR 4)."
+          },
+          "parent": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "record_id",
+              "hash"
+            ],
+            "properties": {
+              "record_id": {
+                "$ref": "#/$defs/ulid"
+              },
+              "hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "issuer": {
+                "type": "string"
+              }
+            }
           }
         }
       }
@@ -353,6 +458,13 @@
         },
         "note": {
           "type": "string"
+        },
+        "shown": {
+          "type": "array",
+          "description": "Digests of the exact material the reviewer was shown (ADR rule 7).",
+          "items": {
+            "$ref": "#/$defs/sha256"
+          }
         }
       }
     },
@@ -473,7 +585,227 @@
         },
         "signature": {
           "type": "string",
-          "description": "Ed25519 signature over hash, base64."
+          "description": "base64 Ed25519 signature over 'adr/0.2 seal\\n' + hash (ADR 5.1)."
+        },
+        "key_id": {
+          "type": "string",
+          "pattern": "^ed25519:[a-f0-9]{16}$",
+          "description": "Issuer key that produced signature."
+        }
+      }
+    },
+    "obligations": {
+      "type": "array",
+      "description": "What had to be true for this decision, from the relying organisation's policy (ADR 1.4).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "requires",
+          "kind"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "clause": {
+            "type": "string"
+          },
+          "policy_id": {
+            "type": "string"
+          },
+          "policy_version": {
+            "type": "string"
+          },
+          "requires": {
+            "type": "string",
+            "enum": [
+              "model_call",
+              "tool_call",
+              "document",
+              "web",
+              "other",
+              "record",
+              "mandate",
+              "attestation",
+              "human_review"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "providers": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "max_age_seconds": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "verifiable",
+              "advisory"
+            ]
+          },
+          "met": {
+            "type": "boolean"
+          },
+          "satisfied_by": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "verdict": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state"
+      ],
+      "description": "Lifecycle state reached and who decided it (ADR 3). Recomputable by a verifier.",
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": [
+            "proposed",
+            "pending_evidence",
+            "escalated",
+            "warranted",
+            "refused",
+            "committed"
+          ]
+        },
+        "decided_by": {
+          "type": "string"
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "from_state": {
+          "type": "string",
+          "enum": [
+            "proposed",
+            "pending_evidence",
+            "escalated",
+            "warranted",
+            "refused",
+            "committed"
+          ],
+          "description": "On a transition record: the state being left."
+        },
+        "reason": {
+          "type": "string"
+        },
+        "met": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "unmet": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "history": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "state",
+              "at"
+            ],
+            "properties": {
+              "state": {
+                "type": "string",
+                "enum": [
+                  "proposed",
+                  "pending_evidence",
+                  "escalated",
+                  "warranted",
+                  "refused",
+                  "committed"
+                ]
+              },
+              "at": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          }
+        }
+      }
+    },
+    "parents": {
+      "type": "array",
+      "description": "Upstream records this decision relies on (ADR rule 5).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "record_id",
+          "hash"
+        ],
+        "properties": {
+          "record_id": {
+            "$ref": "#/$defs/ulid"
+          },
+          "hash": {
+            "$ref": "#/$defs/sha256"
+          },
+          "issuer": {
+            "type": "string"
+          },
+          "key_id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "proposed",
+              "pending_evidence",
+              "escalated",
+              "warranted",
+              "refused",
+              "committed"
+            ]
+          }
+        }
+      }
+    },
+    "retention": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "class"
+      ],
+      "properties": {
+        "class": {
+          "type": "string",
+          "minLength": 1
+        },
+        "retain_until": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "legal_hold": {
+          "type": "boolean"
         }
       }
     }
@@ -536,6 +868,21 @@
       "then": {
         "required": [
           "references"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "record_type": {
+            "const": "transition"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "references",
+          "verdict"
         ]
       }
     }

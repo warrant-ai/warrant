@@ -11,10 +11,11 @@ Two rules the format depends on:
 * **A pack that does not verify is never written.** The chain is checked before anything reaches
   disk, and a failure aborts with the reason. Shipping an evidence pack that fails its own
   verification would be worse than shipping none.
-* **The pack states what it does not prove.** A hash chain shows the records have not been altered
-  since they were sealed relative to one another. It does not show that whoever operates the store
-  could not have re-sealed the whole chain, and per-writer signing is not built. Saying so first is
-  what makes the rest of the document credible.
+* **The pack states what it does not prove,** and the statement depends on what was verified. A
+  hash chain alone does not show the store's operator could not re-seal everything. An issuer
+  signature binds records to the issuer's key but not against the issuer itself. Only a checkpoint
+  co-signed by an independent witness covers that, and only up to the checkpoint. Saying so first
+  is what makes the rest of the document credible.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from warrant import __version__
 from warrant.outcomes import Coverage, coverage
@@ -59,9 +60,11 @@ class Manifest:
     policies: Dict[str, int] = field(default_factory=dict)
     question_sets: Dict[str, int] = field(default_factory=dict)
     verified: bool = False
+    levels: Dict[str, Dict[str, str]] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "levels": self.levels,
             "tenant": self.tenant,
             "stream": self.stream,
             "generated_at": self.generated_at,
@@ -120,6 +123,35 @@ def _describe(records: List[Dict[str, Any]]) -> Manifest:
     return manifest
 
 
+def _limits(manifest: "Manifest", witnesses: Sequence[str]) -> List[str]:
+    """What the pack does not prove, stated for the level the verifier actually reached."""
+    levels = sorted({v["level"] for v in manifest.levels.values()}) or ["below L1"]
+    lines = ["Level reached (Agent Decision Record 0.2): " + ", ".join(f"`{s}` {v['level']}" for s, v in sorted(manifest.levels.items())) + ".", ""]
+    if levels == ["L3"]:
+        lines.append(
+            "The chain head is covered by a checkpoint co-signed by " + ", ".join(witnesses) + ", which "
+            "holds none of these records and co-signs only a tree provably consistent with the last one "
+            "it signed. Rewriting history up to that checkpoint would need the witness's key as well as "
+            "the issuer's. Records written after the checkpoint are covered by the issuer's signature "
+            "alone. Any public-chain anchor listed in a checkpoint is not checked by `warrant`; check it "
+            "with the OpenTimestamps client.")
+    elif "L1" in levels or "L2" in levels:
+        lines.append(
+            "Every record is signed with the issuer's key. That binds the records to the issuer and shows "
+            "they have not changed since. It does **not** show the issuer could not have rewritten its own "
+            "history before anyone else saw it, because the issuer holds its own key. A checkpoint "
+            "co-signed by an independent witness is what covers that, and this pack has none covering "
+            "the chain head.")
+    else:
+        lines.append(
+            "It does **not** show that the operator of the store could not have re-sealed the whole chain "
+            "and produced a different but internally consistent history. These records were verified "
+            "without issuer signatures or a witnessed checkpoint. An evidence store whose operator could "
+            "rewrite it without detection is not fully independent evidence, and this pack says so rather "
+            "than implying otherwise.")
+    return lines
+
+
 def _front_page(
     manifest: Manifest,
     cover: Coverage,
@@ -127,6 +159,11 @@ def _front_page(
     title: Optional[str],
     policies_copied: List[str],
     questions_written: Optional[List[str]] = None,
+    *,
+    keys: Sequence[str] = (),
+    checkpoints: Sequence[str] = (),
+    parents: Sequence[str] = (),
+    witnesses: Sequence[str] = (),
 ) -> str:
     name = title or f"Decision evidence pack — {manifest.stream or 'all streams'}"
     span = (
@@ -164,8 +201,11 @@ def _front_page(
         "Nothing in this pack needs our servers, our software licence or our cooperation:",
         "",
         "```",
-        'pip install "warrantai"',
-        "warrant verify records.jsonl",
+        'pip install "warrantai[sign]"' if keys else 'pip install "warrantai"',
+        "warrant verify records.jsonl"
+        + "".join(f" --keys keys/{k}" for k in keys)
+        + "".join(f" --parents parents/{p}" for p in parents)
+        + "".join(f" --checkpoint checkpoints/{c}" for c in checkpoints),
         "```",
         "",
         "That re-computes every record's hash and walks the chain from first to last. The chain "
@@ -179,11 +219,7 @@ def _front_page(
         "before it. Altering, removing or reordering a single record breaks every link after it, "
         "so the pack shows that these records have not been changed since they were sealed.",
         "",
-        "It does **not** show that the operator of the store could not have re-sealed the whole "
-        "chain and produced a different but internally consistent history. That requires "
-        "per-writer signing and periodic external anchoring, neither of which is implemented in "
-        "this version. An evidence store whose operator could rewrite it without detection is "
-        "not fully independent evidence, and this pack says so rather than implying otherwise.",
+        *_limits(manifest, witnesses),
         "",
         "## Outcome coverage",
         "",
@@ -310,6 +346,9 @@ def build_pack(
     where: Optional[str] = None,
     buckets: int = 10,
     title: Optional[str] = None,
+    keys: Optional[List[Path]] = None,
+    checkpoints: Optional[List[Path]] = None,
+    parents: Optional[List[Path]] = None,
 ) -> PackResult:
     """Write an evidence pack for ``stream`` into ``directory``.
 
@@ -327,7 +366,19 @@ def build_pack(
             else "the store holds no records: nothing to pack"
         )
 
-    reports = verify_records(records)
+    keyring = None
+    checkpoint_bodies: List[Dict[str, Any]] = []
+    parent_records: List[Dict[str, Any]] = []
+    if keys:
+        from warrant.signing import Keyring
+
+        keyring = Keyring.load(*keys)
+    for path in checkpoints or []:
+        checkpoint_bodies.append(json.loads(Path(path).read_text(encoding="utf-8")))
+    for path in parents or []:
+        with Path(path).open(encoding="utf-8") as fh:
+            parent_records.extend(json.loads(line) for line in fh if line.strip())
+    reports = verify_records(records, keyring=keyring, parent_records=parent_records, checkpoints=checkpoint_bodies)
     broken = [r for r in reports if not r.ok]
     if broken:
         detail = "; ".join(f"{r.stream}: {'; '.join(r.errors[:3])}" for r in broken)
@@ -335,6 +386,8 @@ def build_pack(
 
     manifest = _describe(records)
     manifest.verified = True
+    manifest.levels = {r.stream: {"level": r.level, "reason": r.level_reason} for r in reports}
+    witnesses = sorted({co.get("witness") for c in checkpoint_bodies for co in c.get("cosignatures") or []} - {None})
     cover = coverage(store, stream=stream)
 
     # Resolved before a single byte is written, for the same reason the chain is verified first:
@@ -370,6 +423,13 @@ def build_pack(
         )
         written.append("calibration.json")
 
+    for folder, sources in (("keys", keys or []), ("checkpoints", checkpoints or []), ("parents", parents or [])):
+        if sources:
+            (directory / folder).mkdir(exist_ok=True)
+            for source in sources:
+                shutil.copyfile(source, directory / folder / Path(source).name)
+                written.append(f"{folder}/{Path(source).name}")
+
     policies_copied = _copy_policies(policy_dir, directory) if policy_dir else []
     written.extend(f"policies/{name}" for name in policies_copied)
     questions_written: List[str] = []
@@ -383,7 +443,9 @@ def build_pack(
     written.extend(f"questions/{name}" for name in questions_written)
 
     (directory / "README.md").write_text(
-        _front_page(manifest, cover, calibration, title, policies_copied, questions_written),
+        _front_page(manifest, cover, calibration, title, policies_copied, questions_written,
+                    keys=[Path(k).name for k in keys or []], checkpoints=[Path(c).name for c in checkpoints or []],
+                    parents=[Path(p).name for p in parents or []], witnesses=witnesses),
         encoding="utf-8",
     )
     written.append("README.md")

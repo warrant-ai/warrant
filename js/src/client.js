@@ -13,15 +13,18 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import { randomBytes } from "node:crypto";
 import { basename, extname, join } from "node:path";
 import { Emitter } from "./emit.js";
-import { contentHash } from "./hashing.js";
+import { SALT_BYTES, contentHash, recordHash, saltedHash } from "./hashing.js";
+import { verifySeal } from "./signing.js";
 import { ulid } from "./ids.js";
 import { SCHEMA_VERSION, ValidationError, validate } from "./schema.js";
 import { HttpSink } from "./sinks.js";
 
 export const MANDATE_RESULTS = ["allow", "deny", "escalate", "unchecked"];
-export const EVIDENCE_TYPES = ["model_call", "tool_call", "document", "web", "other"];
+export const EVIDENCE_TYPES = ["model_call", "tool_call", "document", "web", "other", "record", "mandate", "attestation", "human_review"];
+export const LIFECYCLE_STATES = ["proposed", "pending_evidence", "escalated", "warranted", "refused", "committed"];
 export const HUMAN_VERDICTS = ["approve", "reject", "amend"];
 const COST_KINDS = ["model_call", "tool_call", "other"];
 const CLASS_RE = /^[a-z0-9_]+(\.[a-z0-9_]+)*$/;
@@ -70,6 +73,14 @@ export class Verdict {
   }
 }
 
+/** An upstream record could not be cited: unsealed, altered, or its signature does not verify. */
+export class CitationError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "CitationError";
+  }
+}
+
 /** One consequential action, opened by `Warrant.decide()` and closed when its callback settles. */
 export class Decision {
   constructor(client, decisionClass, { subject, onBehalfOf, alternatives, recordId } = {}) {
@@ -94,6 +105,10 @@ export class Decision {
     this._costItems = [];
     this._human = { required: false };
     this._inputs = undefined;
+    this._blobs = {};
+    this._claims = [];
+    this._parents = [];
+    this._retention = undefined;
     this._closed = false;
   }
 
@@ -138,16 +153,36 @@ export class Decision {
 
   // -- evidence and cost -----------------------------------------------------
 
-  /** Attach evidence by reference. Content is hashed here and never stored. Returns the hash. */
-  evidence(name, { uri, type = "other", content, contentHash: given, excerpt, retrievedAt } = {}) {
+  /**
+   * Attach evidence by reference. Content is hashed here and never stored. Returns the hash.
+   *
+   * `provider` names who produced it; `obligation` is the obligation id it is offered against.
+   * `sensitive` uses a salted digest (ADR 4): the salt rides to the collector's sidecar, never
+   * onto the record, so erasing the sidecar entry unlinks the digest while the record still verifies.
+   */
+  evidence(name, { uri, type = "other", content, contentHash: given, excerpt, retrievedAt, provider, obligation, sensitive = false } = {}) {
     this._assertOpen();
     requireText(name, "evidence name");
     requireText(uri, "evidence uri");
     if (!EVIDENCE_TYPES.includes(type)) throw new RangeError(`evidence type must be one of ${EVIDENCE_TYPES.join(", ")}, got ${JSON.stringify(type)}`);
     if (content === undefined && given === undefined) throw new TypeError("evidence needs either content (hashed locally) or contentHash");
     if (given !== undefined && !SHA256_RE.test(given)) throw new TypeError("contentHash must be 64 lowercase hex characters (sha256)");
-    const digest = given ?? contentHash(content);
+    if (provider !== undefined) requireText(provider, "provider");
+    if (obligation !== undefined) requireText(obligation, "obligation");
+    let digest;
+    if (sensitive) {
+      if (content === undefined) throw new TypeError("sensitive evidence needs its content: a salted digest cannot be made from a bare hash");
+      if (excerpt !== undefined) throw new TypeError("sensitive evidence cannot carry an excerpt; the excerpt would be the personal data in clear");
+      const salt = randomBytes(SALT_BYTES);
+      digest = saltedHash(content, salt);
+      this._blobs[digest] = { salt: salt.toString("hex") };
+    } else {
+      digest = given ?? contentHash(content);
+    }
     const item = { name, type, uri, content_hash: digest };
+    if (sensitive) item.salted = true;
+    if (provider !== undefined) item.provider = provider;
+    if (obligation !== undefined) item.obligation = obligation;
     if (retrievedAt !== undefined) item.retrieved_at = asTimestamp(retrievedAt);
     if (excerpt !== undefined) {
       if (typeof excerpt !== "string") throw new TypeError("excerpt must be a string");
@@ -155,6 +190,76 @@ export class Decision {
     }
     this._evidence.push(item);
     return digest;
+  }
+
+  /** The hex salt behind a sensitive item's digest, for a caller that keeps its own sidecar. */
+  saltFor(digest) {
+    return this._blobs[digest]?.salt;
+  }
+
+  // -- Agent Decision Record: claims, handoffs, retention ------------------------
+
+  /** Record what the agent asserts. A claim is never evidence, here or downstream (ADR 1.2). */
+  claim(claim, value) {
+    this._assertOpen();
+    requireText(claim, "claim");
+    const item = { claim };
+    if (value !== undefined) {
+      try {
+        item.value = JSON.parse(JSON.stringify(value));
+      } catch (err) {
+        throw new TypeError(`claim value must be JSON-serialisable: ${err.message}`);
+      }
+    }
+    this._claims.push(item);
+  }
+
+  /**
+   * Rely on an upstream agent's sealed record, possibly another organisation's (ADR rule 5). The
+   * parent is cited by id and sealed hash; its claims are never copied. With `keyring` its issuer
+   * signature must verify. `state` overrides the parent's own verdict state. Returns the cited hash.
+   */
+  cite(parent, { keyring, name, obligation, state } = {}) {
+    this._assertOpen();
+    const seal = parent && typeof parent === "object" ? parent.seal : undefined;
+    if (!seal || typeof seal !== "object" || !seal.hash) throw new CitationError("the parent is not sealed; cite a record exported from its issuer's store");
+    if (recordHash(parent, seal.prev_hash) !== seal.hash) throw new CitationError(`parent ${parent.record_id} does not match its own seal; it was altered`);
+    let issuer = parent.tenant;
+    if (keyring) {
+      const result = verifySeal(parent, keyring);
+      if (!result.ok) throw new CitationError(`parent ${parent.record_id}: ${result.reason}`);
+      issuer = result.issuer;
+    }
+    if (state !== undefined && !LIFECYCLE_STATES.includes(state)) throw new RangeError(`state must be one of ${LIFECYCLE_STATES.join(", ")}`);
+    const citedState = state ?? parent.verdict?.state;
+    const entry = { record_id: parent.record_id, hash: seal.hash };
+    if (issuer) entry.issuer = issuer;
+    if (seal.key_id) entry.key_id = seal.key_id;
+    if (citedState) entry.state = citedState;
+    this._parents.push(entry);
+    this.evidence(name ?? `${issuer ?? "upstream"}:${parent.decision?.class ?? "record"}`, {
+      uri: `adr://${issuer ?? "unknown"}/${parent.record_id}#${seal.hash}`,
+      type: "record",
+      contentHash: seal.hash,
+      // Only a verified signature names a provider; an unauthenticated citation cannot authorise.
+      provider: keyring ? issuer || undefined : undefined,
+      obligation,
+      retrievedAt: parent.timestamp,
+    });
+    const link = { record_id: parent.record_id, hash: seal.hash };
+    if (issuer) link.issuer = issuer;
+    this._evidence[this._evidence.length - 1].parent = link;
+    return seal.hash;
+  }
+
+  /** Record the retention duty this decision falls under. The store never deletes. */
+  retention(retentionClass, { retainUntil, legalHold = false } = {}) {
+    this._assertOpen();
+    requireText(retentionClass, "retention class");
+    const item = { class: retentionClass };
+    if (retainUntil !== undefined) item.retain_until = asTimestamp(retainUntil);
+    if (legalHold) item.legal_hold = true;
+    this._retention = item;
   }
 
   /** Record one model call as evidence and as a cost line. */
@@ -244,6 +349,7 @@ export class Decision {
     if (summary) decision.summary = summary;
     if (this._alternatives.length) decision.alternatives = this._alternatives;
     if (this._inputs !== undefined) decision.inputs = this._inputs;
+    if (this._claims.length) decision.claims = [...this._claims];
 
     const verdict = this._verdict ?? new Verdict("unchecked");
     const mandate = { result: verdict.result };
@@ -255,6 +361,9 @@ export class Decision {
 
     const actor = { name: client.agent.name, version: client.agent.version };
     if (client.agent.instance) actor.instance = client.agent.instance;
+    if (client.agent.model) actor.model = client.agent.model;
+    if (client.agent.runtime) actor.runtime = client.agent.runtime;
+    if (client.agent.identity) actor.identity = { ...client.agent.identity };
     const onBehalfOf = this._onBehalfOf ?? client.onBehalfOf;
     if (onBehalfOf) actor.on_behalf_of = onBehalfOf;
 
@@ -279,7 +388,13 @@ export class Decision {
       cost,
       outcome: { status: "pending" },
     };
-    return client.redactor ? client.redactor.apply(record) : record;
+    if (this._parents.length) record.parents = this._parents.map((p) => ({ ...p }));
+    if (this._retention) record.retention = { ...this._retention };
+    const out = client.redactor ? client.redactor.apply(record) : record;
+    // The sidecar travels with the record to the collector, which stores it apart and strips it
+    // before sealing; it never becomes part of the sealed record.
+    if (Object.keys(this._blobs).length) out._blobs = { ...this._blobs };
+    return out;
   }
 }
 
@@ -289,6 +404,12 @@ function agentFrom(agent, logger) {
   let name = agent?.name ?? process.env.WARRANT_AGENT_NAME;
   let version = agent?.version ?? process.env.WARRANT_AGENT_VERSION;
   const instance = agent?.instance ?? process.env.WARRANT_AGENT_INSTANCE;
+  let identity;
+  if (agent?.identity !== undefined) {
+    const [registry, id] = Array.isArray(agent.identity) ? agent.identity : [agent.identity?.registry, agent.identity?.id];
+    identity = { registry: requireText(registry, "agent.identity.registry"), id: requireText(id, "agent.identity.id") };
+    if (!Array.isArray(agent.identity) && agent.identity.uri) identity.uri = agent.identity.uri;
+  }
   if (!name || !version) {
     name = name || (process.argv[1] ? basename(process.argv[1], extname(process.argv[1])) : "unnamed-agent");
     version = version || "0";
@@ -297,7 +418,7 @@ function agentFrom(agent, logger) {
       warnedDefaultAgent = true;
     }
   }
-  return { name: requireText(name, "agent.name"), version: requireText(version, "agent.version"), instance };
+  return { name: requireText(name, "agent.name"), version: requireText(version, "agent.version"), instance, model: agent?.model, runtime: agent?.runtime, identity };
 }
 
 /** Entry point. One instance per stream; share it across decisions. */
@@ -350,7 +471,8 @@ export class Warrant {
     decision._closed = true;
     const record = decision._build(failed ? failure : undefined);
     try {
-      validate(record);
+      const { _blobs, ...body } = record;
+      validate(body);
     } catch (err) {
       if (!(err instanceof ValidationError)) throw err;
       this._log.error(`warrant decision ${decision.recordId} produced an invalid record: ${err.errors.join("; ")}`);

@@ -3,13 +3,15 @@
 export const VERSION: string;
 export const SCHEMA_VERSION: "0";
 export const MANDATE_RESULTS: readonly ["allow", "deny", "escalate", "unchecked"];
-export const EVIDENCE_TYPES: readonly ["model_call", "tool_call", "document", "web", "other"];
+export const EVIDENCE_TYPES: readonly ["model_call", "tool_call", "document", "web", "other", "record", "mandate", "attestation", "human_review"];
+export const LIFECYCLE_STATES: readonly ["proposed", "pending_evidence", "escalated", "warranted", "refused", "committed"];
 export const HUMAN_VERDICTS: readonly ["approve", "reject", "amend"];
 export const TEXT_FIELDS: readonly string[];
 
 export type MandateResult = (typeof MANDATE_RESULTS)[number];
 export type EvidenceType = (typeof EVIDENCE_TYPES)[number];
 export type HumanVerdict = (typeof HUMAN_VERDICTS)[number];
+export type LifecycleState = (typeof LIFECYCLE_STATES)[number];
 export type CostKind = "model_call" | "tool_call" | "other";
 export type Timestamp = string | Date;
 /** A decision record as plain JSON. See `warrantai/schema` for the full shape. */
@@ -54,6 +56,12 @@ export interface AgentInfo {
   name: string;
   version: string;
   instance?: string;
+  /** Model the agent ran on, as the runtime reported it. */
+  model?: string;
+  /** Agent runtime or framework, e.g. temporal, langgraph. */
+  runtime?: string;
+  /** The agent's entry in a registry the relying party recognises: `[registry, id]` or an object. */
+  identity?: readonly [string, string] | { registry: string; id: string; uri?: string };
 }
 
 export interface EvidenceOptions {
@@ -66,8 +74,23 @@ export interface EvidenceOptions {
   /** Opt-in free text; redacted before it leaves the process. */
   excerpt?: string;
   retrievedAt?: Timestamp;
+  /** Who produced it. The acting agent's own evidence is never admitted for its own obligation. */
+  provider?: string;
+  /** The obligation id this item is offered against. */
+  obligation?: string;
+  /** Salted digest (ADR 4). Needs `content`; refuses `excerpt` and a bare `contentHash`. */
+  sensitive?: boolean;
 }
 
+/** An upstream record could not be cited: unsealed, altered, or its signature does not verify. */
+export class CitationError extends Error {}
+
+/**
+ * Agent Decision Record support in JavaScript covers the record path: salted evidence, claims,
+ * citations, retention and identity, plus the verifier primitives (`verifySeal`, the Merkle
+ * functions). Obligations, the warrant check, fail-closed commit and lifecycle transitions are
+ * Python-only in this release, like replay.
+ */
 export class Decision {
   readonly recordId: string;
   readonly decisionClass: string;
@@ -85,6 +108,13 @@ export class Decision {
   /** Call once, after the action succeeds. */
   act(action: string, options?: { summary?: string; costCentre?: string; alternatives?: string[] }): void;
   requireHuman(options?: { reviewer?: string; note?: string }): void;
+  /** The hex salt behind a sensitive item's digest. */
+  saltFor(digest: string): string | undefined;
+  /** What the agent asserts. Never evidence, here or downstream. */
+  claim(claim: string, value?: unknown): void;
+  /** Rely on an upstream sealed record by id and hash. Returns the cited hash. */
+  cite(parent: DecisionRecord, options?: { keyring?: Keyring; name?: string; obligation?: string; state?: LifecycleState }): string;
+  retention(retentionClass: string, options?: { retainUntil?: Timestamp; legalHold?: boolean }): void;
 }
 
 export interface WarrantOptions {
@@ -168,3 +198,69 @@ export function contentHash(content: unknown): string;
 export function ulid(nowMs?: number): string;
 /** ULID derived from `key`, so a repeated event gets the same id; same bytes as the Python SDK. */
 export function deterministicUlid(tsMs: number, key: string): string;
+
+export const SALT_BYTES: 32;
+/** The bytes a content hash covers. */
+export function contentBytes(content: unknown): Buffer;
+/** ADR 4: SHA-256(salt || content), hex. `salt` must be 32 bytes. */
+export function saltedHash(content: unknown, salt: Uint8Array): string;
+/** The seal hash: every field but `seal`, canonical JSON, chained to `prevHash`. */
+export function recordHash(record: DecisionRecord, prevHash: string | null | undefined): string;
+
+export const SEAL_CONTEXT: "adr/0.2 seal\n";
+export const CHECKPOINT_CONTEXT: "adr/0.2 checkpoint\n";
+export class SigningError extends Error {}
+export function keyIdFor(rawPublic: Uint8Array): string;
+
+export interface KeyEntry {
+  issuer: string;
+  key_id?: string;
+  alg?: "Ed25519";
+  public_key: string;
+  not_before?: string | null;
+  revoked_at?: string | null;
+}
+
+export class PublicKey {
+  constructor(issuer: string, raw: Uint8Array, options?: { notBefore?: string | null; revokedAt?: string | null });
+  static fromEntry(entry: KeyEntry): PublicKey;
+  readonly issuer: string;
+  readonly keyId: string;
+  readonly raw: Buffer;
+  readonly notBefore: string | null;
+  readonly revokedAt: string | null;
+  toEntry(): Required<KeyEntry>;
+  validAt(timestamp: string): [boolean, string];
+  verify(message: string, signatureB64: string): boolean;
+}
+
+export class Keyring implements Iterable<PublicKey> {
+  constructor(keys?: Iterable<PublicKey>);
+  /** From parsed key-set documents. Refuses a set holding a private key. */
+  static fromKeySets(...sets: { keys: KeyEntry[] }[]): Keyring;
+  add(key: PublicKey): void;
+  get(keyId: string): PublicKey | undefined;
+  readonly size: number;
+  [Symbol.iterator](): Iterator<PublicKey>;
+}
+
+export class SigningKey {
+  constructor(issuer: string, rawPrivate: Uint8Array);
+  static fromPrivateBytes(issuer: string, raw: Uint8Array): SigningKey;
+  readonly issuer: string;
+  readonly keyId: string;
+  readonly public: PublicKey;
+  sign(message: string): string;
+  signSeal(hash: string): { key_id: string; signature: string };
+}
+
+export type SealCheck = { ok: true; issuer: string } | { ok: false; reason: string };
+/** Checks the issuer signature over `seal.hash`; whether the hash matches the body is the chain check's job. */
+export function verifySeal(record: DecisionRecord, keyring: Keyring): SealCheck;
+
+/** RFC 9162 Merkle functions over hex leaf hashes, byte-identical to the Python reference. */
+export function merkleRoot(entries: readonly string[]): string;
+export function inclusionProof(index: number, entries: readonly string[]): string[];
+export function verifyInclusion(entry: string, index: number, treeSize: number, proof: readonly string[], root: string): boolean;
+export function consistencyProof(oldSize: number, entries: readonly string[]): string[];
+export function verifyConsistency(oldSize: number, newSize: number, oldRoot: string, newRoot: string, proof: readonly string[]): boolean;

@@ -2,7 +2,7 @@
 
 The decision ledger for AI agents. Every consequential action an agent takes is recorded with the mandate that allowed it, the evidence it used, what it cost, and how it turned out. Developers replay real recorded decisions against a changed prompt, model or policy before shipping. Risk, finance and audit teams get records they can sample and verify without trusting the vendor.
 
-Status: pre-alpha. 0.1.0 shipped the Python `decide()` SDK, CEL policy checks, the local append-only store and verifier, replay with `warrant test`, OpenTelemetry evidence capture, and `warrant import` for existing trace exports; see `python/README.md`. 0.2.0 adds the collector and a PostgreSQL store for shared deployments, the JavaScript and TypeScript SDK (`js/README.md`), and policy bundles that evaluate identically in both languages (`conformance/`). 0.3.0 adds adapters for the Claude Agent SDK, LangGraph and Temporal (Python, and Temporal in JavaScript too), an MCP server, and a GitHub Action that replays recorded decisions in CI.
+Status: pre-alpha. 0.1.0 shipped the Python `decide()` SDK, CEL policy checks, the local append-only store and verifier, replay with `warrant test`, OpenTelemetry evidence capture, and `warrant import` for existing trace exports; see `python/README.md`. 0.2.0 adds the collector and a PostgreSQL store for shared deployments, the JavaScript and TypeScript SDK (`js/README.md`), and policy bundles that evaluate identically in both languages (`conformance/`). 0.3.0 adds adapters for the Claude Agent SDK, LangGraph and Temporal (Python, and Temporal in JavaScript too), an MCP server, and a GitHub Action that replays recorded decisions in CI. 0.4.0 to 0.6.0 add outcomes, calibration, evidence packs, question sets, drift gates, dated policies, breakers and decision-model adapters. On main for 0.7.0: the Agent Decision Record (`spec/adr-0.2.md`), with issuer signing, admissibility rules and a warrant lifecycle, salted digests with erasure, witnessed checkpoints, cross-organisation trace, and an in-process Laya adapter.
 
 | Package | Install | Import |
 |---|---|---|
@@ -49,6 +49,7 @@ The full SDK guide is in `python/README.md`.
 
 ## Layout
 
+- `spec/` the Agent Decision Record specification (CC BY 4.0).
 - `schema/` canonical JSON Schema for the decision record. Edit here, then run `scripts/sync-schema.sh` to copy it into both packages.
 - `examples/` records that validate against the schema, a policy bundle, a trace export with its import taxonomy, and the lending gallery; used by the test suites and the quick start.
 - `python/` the `warrantai` Python package (module name `warrant`).

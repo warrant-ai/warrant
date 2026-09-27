@@ -329,3 +329,34 @@ def test_sdk_spills_when_collector_is_down_and_recovers(tmp_path):
     server.should_exit = True
     thread.join(5)
     store.close()
+
+
+@pytest.mark.skipif(not _pg_available(), reason="no PostgreSQL at WARRANT_TEST_PG")
+def test_postgres_signs_erases_and_carries_the_lifecycle(tmp_path):
+    """The ADR path end to end on PostgreSQL: signed seals, a salted sidecar erased, a transition."""
+    pytest.importorskip("cryptography")
+    import psycopg
+
+    from warrant import AgentInfo, Warrant
+    from warrant.signing import Keyring, SigningKey
+
+    with psycopg.connect(PG_DSN, autocommit=True) as conn:
+        conn.execute("DROP TABLE IF EXISTS records, stream_heads, evidence_blobs CASCADE")
+    key = SigningKey.generate("demo-bank")
+    w = Warrant("lending", tenant="demo-bank", store=PG_DSN, signing_key=key, agent=AgentInfo("credit-agent", "1"), flush_interval=0.02)
+    try:
+        with w.decide("credit.approve", subject="LN-1") as d:
+            d.obligation("OB-1", requires="human_review")
+            shown = d.evidence("statement", uri="doc://1", type="document", provider="bank-ops", content={"pan": "ABCDE1234F"}, sensitive=True)
+        w.transition(d.record_id, "warranted", decided_by="human:officer", reviewer="officer", shown=[shown])
+        w.flush()
+        records = list(w.store.iter_records("lending"))
+        assert [r["record_type"] for r in records] == ["decision", "transition"]
+        assert all(r["seal"]["key_id"] == key.key_id for r in records)
+        report = verify_records(records, keyring=Keyring([key.public]))[0]
+        assert report.ok and report.level == "L2", report.warnings
+        assert len(w.store.get_blob(shown)["salt"]) == 64
+        assert w.store.erase_blob(shown) and w.store.get_blob(shown) is None
+        assert verify_records(list(w.store.iter_records("lending")), keyring=Keyring([key.public]))[0].ok
+    finally:
+        w.close()

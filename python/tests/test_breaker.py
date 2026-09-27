@@ -218,7 +218,10 @@ def test_the_breaker_takes_a_decision_away_from_the_machine(tmp_path):
 
     db = tmp_path / "live.db"
     seed = SQLiteStore(db)
-    seed.write([_decision(i, route="auto") for i in range(20)])  # auto-share already at 1.0
+    # The adapter reads the real clock, so the seed must be recent by the real clock too; seeding
+    # relative to the fixed NOW made this test pass only within 24 hours of 20 Sep 2026.
+    recent = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    seed.write([{**_decision(i, route="auto"), "timestamp": recent} for i in range(20)])  # auto-share already at 1.0
     seed.close()
 
     def run(with_breaker):

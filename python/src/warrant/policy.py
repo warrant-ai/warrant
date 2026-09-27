@@ -25,6 +25,7 @@ the ``policy`` extra: ``pip install "warrantai[policy]"``.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import re
@@ -88,6 +89,56 @@ class Clause:
     title: Optional[str] = None
 
 
+OBLIGATION_KINDS = ("verifiable", "advisory")
+OBLIGATION_TYPES = ("model_call", "tool_call", "document", "web", "other", "record", "mandate", "attestation", "human_review")
+_DURATION = re.compile(r"^\s*(\d+)\s*([smhd]?)\s*$")
+_UNIT_SECONDS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def parse_duration(value: Any, where: str) -> int:
+    """``30d``, ``12h``, ``90m``, ``45s`` or a whole number of seconds."""
+    if isinstance(value, bool):
+        raise PolicyError(f"{where}: not a duration: {value!r}")
+    if isinstance(value, int):
+        if value < 0:
+            raise PolicyError(f"{where}: a duration cannot be negative")
+        return value
+    match = _DURATION.match(str(value))
+    if not match:
+        raise PolicyError(f"{where}: not a duration (use e.g. 30d, 12h, 90m or seconds): {value!r}")
+    return int(match.group(1)) * _UNIT_SECONDS[match.group(2)]
+
+
+@dataclass(frozen=True)
+class ObligationSpec:
+    """What has to be true before a decision of this class is warranted (ADR 1.4).
+
+    ``when`` is an optional CEL condition over the same inputs as the clauses, for obligations that
+    apply only sometimes: an officer's sign-off above an approval limit.
+    """
+
+    id: str
+    requires: str
+    kind: str = "verifiable"
+    providers: Tuple[str, ...] = ()
+    max_age_seconds: Optional[int] = None
+    name: Optional[str] = None
+    clause: Optional[str] = None
+    title: Optional[str] = None
+    when: Optional[str] = None
+
+    def to_record(self, policy: "Policy") -> Dict[str, Any]:
+        out: Dict[str, Any] = {"id": self.id, "requires": self.requires, "kind": self.kind,
+                               "policy_id": policy.policy_id, "policy_version": policy.version}
+        if self.providers:
+            out["providers"] = list(self.providers)
+        for key in ("max_age_seconds", "name", "clause", "title"):
+            value = getattr(self, key)
+            if value is not None:
+                out[key] = value
+        return out
+
+
 @dataclass(frozen=True)
 class PolicyTest:
     name: str
@@ -109,7 +160,11 @@ class Policy:
     source: Optional[str] = None
     effective_from: Optional[str] = None
     effective_to: Optional[str] = None
+    obligations: List[ObligationSpec] = field(default_factory=list)
+    enforce: bool = False
+    retention: Optional[Dict[str, Any]] = None
     _programs: List[Any] = field(default_factory=list, repr=False)
+    _obligation_programs: List[Any] = field(default_factory=list, repr=False)
 
     def covers(self, at: Optional[str]) -> bool:
         """Was this version in force at ``at``? An undated policy is in force always."""
@@ -344,6 +399,12 @@ def load_policy(path: Path) -> Policy:
         clause = rt.get("clause")
         tests.append(PolicyTest(name=str(rt.get("name") or f"test #{i + 1}"), inputs=dict(rt["inputs"]), expect=expect, clause=str(clause) if clause is not None else None))
 
+    obligations, obligation_programs = _load_obligations(path.name, raw.get("obligations"), env, celpy, {c.id for c in clauses})
+    enforce = raw.get("enforce", False)
+    if not isinstance(enforce, bool):
+        raise PolicyError(f"{path.name}: 'enforce' must be true or false")
+    retention = _load_retention(path.name, raw.get("retention"))
+
     title = raw.get("title")
     return Policy(
         policy_id=policy_id,
@@ -357,8 +418,75 @@ def load_policy(path: Path) -> Policy:
         source=path.name,
         effective_from=effective_from,
         effective_to=effective_to,
+        obligations=obligations,
+        enforce=enforce,
+        retention=retention,
         _programs=programs,
+        _obligation_programs=obligation_programs,
     )
+
+
+def _load_obligations(file_name: str, raw: Any, env: Any, celpy: Any, clause_ids: set) -> Tuple[List[ObligationSpec], List[Any]]:
+    if raw is None:
+        return [], []
+    if not isinstance(raw, list):
+        raise PolicyError(f"{file_name}: 'obligations' must be a list")
+    specs: List[ObligationSpec] = []
+    programs: List[Any] = []
+    seen = set()
+    for i, ro in enumerate(raw):
+        where = f"{file_name}: obligation #{i + 1}"
+        if not isinstance(ro, dict):
+            raise PolicyError(f"{where} must be a mapping")
+        oid = str(ro.get("id", "")).strip()
+        if not oid:
+            raise PolicyError(f"{where} has no id")
+        if oid in seen:
+            raise PolicyError(f"{file_name}: duplicate obligation id {oid!r}")
+        seen.add(oid)
+        where = f"{file_name}: obligation {oid}"
+        requires = str(ro.get("requires", ""))
+        if requires not in OBLIGATION_TYPES:
+            raise PolicyError(f"{where}: requires must be one of {OBLIGATION_TYPES}, got {requires!r}")
+        kind = str(ro.get("kind", "verifiable"))
+        if kind not in OBLIGATION_KINDS:
+            raise PolicyError(f"{where}: kind must be verifiable or advisory, got {kind!r}")
+        providers = ro.get("providers") or []
+        if not isinstance(providers, list) or not all(isinstance(p, str) and p for p in providers):
+            raise PolicyError(f"{where}: providers must be a list of provider names")
+        if "self" in providers:
+            raise PolicyError(f"{where}: 'self' cannot be a qualified provider; the acting agent never supplies evidence for its own obligation")
+        max_age = parse_duration(ro["max_age"], f"{where}: max_age") if ro.get("max_age") is not None else None
+        clause = ro.get("clause")
+        if clause is not None and str(clause) not in clause_ids:
+            raise PolicyError(f"{where}: clause {clause!r} is not a clause of this policy")
+        when = ro.get("when")
+        program = None
+        if when is not None:
+            if not isinstance(when, str) or not when.strip():
+                raise PolicyError(f"{where}: 'when' must be a CEL expression string")
+            try:
+                program = env.program(env.compile(when))
+            except celpy.CELParseError as exc:
+                raise PolicyError(f"{where}: CEL parse error: {exc}") from exc
+        specs.append(ObligationSpec(
+            id=oid, requires=requires, kind=kind, providers=tuple(providers), max_age_seconds=max_age,
+            name=str(ro["name"]) if ro.get("name") else None, clause=str(clause) if clause is not None else None,
+            title=str(ro["title"]) if ro.get("title") else None, when=when.strip() if when else None,
+        ))
+        programs.append(program)
+    return specs, programs
+
+
+def _load_retention(file_name: str, raw: Any) -> Optional[Dict[str, Any]]:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or not isinstance(raw.get("class"), str) or not raw["class"]:
+        raise PolicyError(f"{file_name}: retention must be a mapping with a 'class' name")
+    out: Dict[str, Any] = {"class": raw["class"]}
+    if raw.get("period") is not None:
+        out["seconds"] = parse_duration(raw["period"], f"{file_name}: retention period")
+    return out
 
 
 class CelPolicyEngine:
@@ -397,14 +525,34 @@ class CelPolicyEngine:
             if not isinstance(matched, bool) and type(matched).__name__ != "BoolType":
                 return self._fail(policy, f"clause {clause.id}: expression returned {type(matched).__name__}, not bool")
             if matched:
-                return Verdict(clause.result, policy_id=policy.policy_id, policy_version=policy.version, clause=clause.id, reason=clause.title or f"clause {clause.id} matched")
-        return Verdict(policy.default, policy_id=policy.policy_id, policy_version=policy.version, reason="no clause matched")
+                return self._with_adr(policy, activation, Verdict(clause.result, policy_id=policy.policy_id, policy_version=policy.version, clause=clause.id, reason=clause.title or f"clause {clause.id} matched"))
+        return self._with_adr(policy, activation, Verdict(policy.default, policy_id=policy.policy_id, policy_version=policy.version, reason="no clause matched"))
 
-    @staticmethod
-    def _fail(policy: Policy, detail: str) -> Verdict:
+    def _with_adr(self, policy: Policy, activation: Any, verdict: Verdict) -> Verdict:
+        """Attach the obligations that apply, the enforcement mode and the retention class.
+
+        An obligation whose ``when`` cannot be evaluated applies: failing towards more evidence is
+        the only safe direction for a rule that decides what has to be proven.
+        """
+        if not policy.obligations and not policy.enforce and policy.retention is None:
+            return verdict
+        applicable = []
+        for spec, program in zip(policy.obligations, policy._obligation_programs):
+            if program is not None and activation is not None:
+                try:
+                    applies = program.evaluate(activation)
+                except self._celpy.CELEvalError as exc:
+                    log.warning("warrant policy %s obligation %s condition could not evaluate (%s); it applies", policy.policy_id, spec.id, _short(exc))
+                    applies = True
+                if not bool(applies):
+                    continue
+            applicable.append(spec.to_record(policy))
+        return dataclasses.replace(verdict, obligations=tuple(applicable), enforce=policy.enforce, retention=policy.retention)
+
+    def _fail(self, policy: Policy, detail: str) -> Verdict:
         result = _FAIL_RESULT[policy.fail_mode]
         log.warning("warrant policy %s could not evaluate (%s); fail-%s applied", policy.policy_id, detail, policy.fail_mode)
-        return Verdict(result, policy_id=policy.policy_id, policy_version=policy.version, reason=f"fail-{policy.fail_mode}: {detail}", flagged=True)
+        return self._with_adr(policy, None, Verdict(result, policy_id=policy.policy_id, policy_version=policy.version, reason=f"fail-{policy.fail_mode}: {detail}", flagged=True))
 
 
 def run_policy_tests(bundle: PolicyBundle) -> List[PolicyTestResult]:

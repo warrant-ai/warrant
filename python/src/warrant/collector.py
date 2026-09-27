@@ -191,13 +191,24 @@ def create_app(store, *, tokens: Optional[Dict[str, str]] = None, insecure: bool
     return app
 
 
-def serve(store_url: str, *, listen: str = "127.0.0.1:8787", tokens: Optional[Dict[str, str]] = None, insecure: bool = False) -> None:
-    """Run the collector with uvicorn until interrupted."""
+def serve(
+    store_url: str,
+    *,
+    listen: str = "127.0.0.1:8787",
+    tokens: Optional[Dict[str, str]] = None,
+    insecure: bool = False,
+    signing_key: Optional[str] = None,
+) -> None:
+    """Run the collector with uvicorn until interrupted. A signing key makes it an ADR issuer."""
     import uvicorn
 
+    from warrant.signing import resolve_signing_key
     from warrant.store import open_store
 
-    store = open_store(store_url)
+    signer = resolve_signing_key(signing_key)
+    store = open_store(store_url, signer=signer)
+    if signer is not None:
+        log.info("warrant collector signing as %s with %s", signer.issuer, signer.key_id)
     app = create_app(store, tokens=tokens, insecure=insecure)
     host, _, port = listen.rpartition(":")
     log.info("warrant collector %s listening on %s, store %s", __version__, listen, getattr(store, "path", store_url))

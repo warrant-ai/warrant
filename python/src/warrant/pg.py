@@ -13,8 +13,9 @@ import threading
 from typing import Any, Dict, Iterator, List, Optional, Sequence
 
 from warrant.emit import PermanentSinkError
-from warrant.hashing import canonical_json, record_hash
+from warrant.hashing import canonical_json
 from warrant.schema import ValidationError, validate
+from warrant.store import seal_record
 
 try:
     import psycopg
@@ -74,8 +75,9 @@ _SETUP_LOCK = 7_318_204_119  # arbitrary advisory lock key for schema setup
 
 
 class PostgresStore:
-    def __init__(self, dsn: str, *, read_only: bool = False) -> None:
+    def __init__(self, dsn: str, *, read_only: bool = False, signer: Any = None) -> None:
         self.dsn = dsn
+        self.signer = signer
         self.path = dsn.split("@")[-1]  # host/db only, for logs
         self._lock = threading.Lock()
         self._conn = psycopg.connect(dsn, row_factory=dict_row, autocommit=False)
@@ -141,9 +143,7 @@ class PostgresStore:
         stream_seq = head["stream_seq"] + 1
         prev_hash = head["hash"] or None
 
-        sealed = dict(record)
-        sealed["sequence"] = stream_seq
-        sealed["seal"] = {"prev_hash": prev_hash, "hash": record_hash(sealed, prev_hash)}
+        sealed = seal_record(record, stream_seq, prev_hash, self.signer)
         try:
             validate(sealed)
         except ValidationError as exc:
@@ -198,6 +198,20 @@ class PostgresStore:
         sql += " ORDER BY seq DESC LIMIT 1"
         rows = self._query(sql, tuple(params))
         return rows[0]["record_id"] if rows else None
+
+    def linked(self, decision_record_id: str) -> List[Dict[str, Any]]:
+        """Records that reference a decision (outcomes, verdicts, transitions), in chain order."""
+        return [_body(r) for r in self._query("SELECT body FROM records WHERE decision_record_id = %s ORDER BY seq", (decision_record_id,))]
+
+    def erase_blob(self, content_hash: str) -> bool:
+        """Delete one sidecar entry: captured content and its salt (ADR 4). Never touches a record."""
+        with self._lock:
+            with self._conn.cursor() as cur:
+                cur.execute("DELETE FROM evidence_blobs WHERE hash = %s", (content_hash,))
+                erased = cur.rowcount > 0
+            self._conn.commit()
+        log.info("warrant postgres erase sidecar %s: %s", content_hash[:12], "erased" if erased else "nothing held")
+        return erased
 
     def get_blob(self, content_hash: str) -> Optional[Dict[str, Any]]:
         rows = self._query("SELECT blob FROM evidence_blobs WHERE hash = %s", (content_hash,))

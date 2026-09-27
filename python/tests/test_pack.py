@@ -81,10 +81,11 @@ def test_the_packed_records_verify_offline(tmp_path, store):
 def test_the_front_page_states_what_the_chain_does_not_prove(tmp_path, store):
     build_pack(store, tmp_path / "pack", stream="aml")
     front = (tmp_path / "pack" / "README.md").read_text()
-    # Claiming tamper-proof-against-the-operator would be false until per-writer signing ships.
+    # An unsigned, unwitnessed chain says plainly that the operator could have re-sealed it.
     assert "does **not** show" in front
     assert "re-sealed the whole chain" in front
-    assert "per-writer signing" in front
+    assert "without issuer signatures or a witnessed checkpoint" in front
+    assert "below L1" in front
 
 
 def test_calibration_section_appears_only_when_asked(tmp_path, store):
