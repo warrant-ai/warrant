@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.7.0 (2026-09-27)
 
 The Agent Decision Record. Records become something another organisation can rely on without trusting the system that wrote them: signed by their issuer, warranted only by admissible evidence, and attested by a witness that holds none of the data. Specification: `spec/adr-0.2.md` (CC BY 4.0).
