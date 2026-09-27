@@ -1,0 +1,538 @@
+{
+  "generated_at": "2026-09-27T07:18:26Z",
+  "config": {
+    "cases": 300,
+    "seed": 7,
+    "fault_rate": 0.75,
+    "mixed_extraction_weight": 2.0,
+    "cross_org": 0.5,
+    "judge": "not run (needs a model; costs money)",
+    "agents": "sim"
+  },
+  "timing_seconds": {
+    "pipelines": 1.06,
+    "attribution": 0.19,
+    "total": 2.06
+  },
+  "counts": {
+    "cases": 300,
+    "faulted": 225,
+    "honest": 75,
+    "e2e_failures": 59
+  },
+  "blame": {
+    "overall": {
+      "1 raw traces + LLM judge": {
+        "agent": "not run",
+        "step": "not run",
+        "agent_on_failures": "not run",
+        "false_alarms": "not run",
+        "n": 225
+      },
+      "2a logs, generic heuristic": {
+        "agent": 0.289,
+        "step": 0.213,
+        "agent_on_failures": 0.576,
+        "step_on_failures": 0.492,
+        "false_alarms": 0.0,
+        "n": 225,
+        "n_failures": 59,
+        "n_honest": 75
+      },
+      "2b logs + runbook": {
+        "agent": 0.773,
+        "step": 0.747,
+        "agent_on_failures": 0.847,
+        "step_on_failures": 0.831,
+        "false_alarms": 0.0,
+        "n": 225,
+        "n_failures": 59,
+        "n_honest": 75
+      },
+      "3 ADR records": {
+        "agent": 1.0,
+        "step": 1.0,
+        "agent_on_failures": 1.0,
+        "step_on_failures": 1.0,
+        "false_alarms": 0.0,
+        "n": 225,
+        "n_failures": 59,
+        "n_honest": 75
+      }
+    },
+    "depth": {
+      "3": {
+        "2a logs, generic heuristic": {
+          "agent": 0.287,
+          "step": 0.25,
+          "agent_on_failures": 0.655,
+          "step_on_failures": 0.552,
+          "false_alarms": 0.0,
+          "n": 80,
+          "n_failures": 29,
+          "n_honest": 20
+        },
+        "2b logs + runbook": {
+          "agent": 0.688,
+          "step": 0.688,
+          "agent_on_failures": 0.793,
+          "step_on_failures": 0.793,
+          "false_alarms": 0.0,
+          "n": 80,
+          "n_failures": 29,
+          "n_honest": 20
+        },
+        "3 ADR records": {
+          "agent": 1.0,
+          "step": 1.0,
+          "agent_on_failures": 1.0,
+          "step_on_failures": 1.0,
+          "false_alarms": 0.0,
+          "n": 80,
+          "n_failures": 29,
+          "n_honest": 20
+        }
+      },
+      "4": {
+        "2a logs, generic heuristic": {
+          "agent": 0.234,
+          "step": 0.221,
+          "agent_on_failures": 0.632,
+          "step_on_failures": 0.579,
+          "false_alarms": 0.0,
+          "n": 77,
+          "n_failures": 19,
+          "n_honest": 23
+        },
+        "2b logs + runbook": {
+          "agent": 0.701,
+          "step": 0.701,
+          "agent_on_failures": 0.842,
+          "step_on_failures": 0.842,
+          "false_alarms": 0.0,
+          "n": 77,
+          "n_failures": 19,
+          "n_honest": 23
+        },
+        "3 ADR records": {
+          "agent": 1.0,
+          "step": 1.0,
+          "agent_on_failures": 1.0,
+          "step_on_failures": 1.0,
+          "false_alarms": 0.0,
+          "n": 77,
+          "n_failures": 19,
+          "n_honest": 23
+        }
+      },
+      "5": {
+        "2a logs, generic heuristic": {
+          "agent": 0.353,
+          "step": 0.162,
+          "agent_on_failures": 0.273,
+          "step_on_failures": 0.182,
+          "false_alarms": 0.0,
+          "n": 68,
+          "n_failures": 11,
+          "n_honest": 32
+        },
+        "2b logs + runbook": {
+          "agent": 0.956,
+          "step": 0.868,
+          "agent_on_failures": 1.0,
+          "step_on_failures": 0.909,
+          "false_alarms": 0.0,
+          "n": 68,
+          "n_failures": 11,
+          "n_honest": 32
+        },
+        "3 ADR records": {
+          "agent": 1.0,
+          "step": 1.0,
+          "agent_on_failures": 1.0,
+          "step_on_failures": 1.0,
+          "false_alarms": 0.0,
+          "n": 68,
+          "n_failures": 11,
+          "n_honest": 32
+        }
+      }
+    },
+    "form": {
+      "code_mixed": {
+        "2a logs, generic heuristic": {
+          "agent": 0.278,
+          "step": 0.183,
+          "agent_on_failures": 0.5,
+          "step_on_failures": 0.385,
+          "false_alarms": 0.0,
+          "n": 115,
+          "n_failures": 26,
+          "n_honest": 35
+        },
+        "2b logs + runbook": {
+          "agent": 0.739,
+          "step": 0.713,
+          "agent_on_failures": 0.808,
+          "step_on_failures": 0.808,
+          "false_alarms": 0.0,
+          "n": 115,
+          "n_failures": 26,
+          "n_honest": 35
+        },
+        "3 ADR records": {
+          "agent": 1.0,
+          "step": 1.0,
+          "agent_on_failures": 1.0,
+          "step_on_failures": 1.0,
+          "false_alarms": 0.0,
+          "n": 115,
+          "n_failures": 26,
+          "n_honest": 35
+        }
+      },
+      "english": {
+        "2a logs, generic heuristic": {
+          "agent": 0.3,
+          "step": 0.245,
+          "agent_on_failures": 0.636,
+          "step_on_failures": 0.576,
+          "false_alarms": 0.0,
+          "n": 110,
+          "n_failures": 33,
+          "n_honest": 40
+        },
+        "2b logs + runbook": {
+          "agent": 0.809,
+          "step": 0.782,
+          "agent_on_failures": 0.879,
+          "step_on_failures": 0.848,
+          "false_alarms": 0.0,
+          "n": 110,
+          "n_failures": 33,
+          "n_honest": 40
+        },
+        "3 ADR records": {
+          "agent": 1.0,
+          "step": 1.0,
+          "agent_on_failures": 1.0,
+          "step_on_failures": 1.0,
+          "false_alarms": 0.0,
+          "n": 110,
+          "n_failures": 33,
+          "n_honest": 40
+        }
+      }
+    },
+    "organisations": {
+      "cross-org": {
+        "2a logs, generic heuristic": {
+          "agent": 0.231,
+          "step": 0.162,
+          "agent_on_failures": 0.548,
+          "step_on_failures": 0.452,
+          "false_alarms": 0.0,
+          "n": 117,
+          "n_failures": 31,
+          "n_honest": 37
+        },
+        "2b logs + runbook": {
+          "agent": 0.564,
+          "step": 0.513,
+          "agent_on_failures": 0.71,
+          "step_on_failures": 0.677,
+          "false_alarms": 0.0,
+          "n": 117,
+          "n_failures": 31,
+          "n_honest": 37
+        },
+        "3 ADR records": {
+          "agent": 1.0,
+          "step": 1.0,
+          "agent_on_failures": 1.0,
+          "step_on_failures": 1.0,
+          "false_alarms": 0.0,
+          "n": 117,
+          "n_failures": 31,
+          "n_honest": 37
+        }
+      },
+      "single-org": {
+        "2a logs, generic heuristic": {
+          "agent": 0.352,
+          "step": 0.269,
+          "agent_on_failures": 0.607,
+          "step_on_failures": 0.536,
+          "false_alarms": 0.0,
+          "n": 108,
+          "n_failures": 28,
+          "n_honest": 38
+        },
+        "2b logs + runbook": {
+          "agent": 1.0,
+          "step": 1.0,
+          "agent_on_failures": 1.0,
+          "step_on_failures": 1.0,
+          "false_alarms": 0.0,
+          "n": 108,
+          "n_failures": 28,
+          "n_honest": 38
+        },
+        "3 ADR records": {
+          "agent": 1.0,
+          "step": 1.0,
+          "agent_on_failures": 1.0,
+          "step_on_failures": 1.0,
+          "false_alarms": 0.0,
+          "n": 108,
+          "n_failures": 28,
+          "n_honest": 38
+        }
+      }
+    },
+    "fault_kind": {
+      "bad_source": {
+        "2a logs, generic heuristic": {
+          "agent": 0.4,
+          "step": 0.233,
+          "agent_on_failures": 0.625,
+          "step_on_failures": 0.438,
+          "false_alarms": null,
+          "n": 90,
+          "n_failures": 16,
+          "n_honest": 0
+        },
+        "2b logs + runbook": {
+          "agent": 0.733,
+          "step": 0.667,
+          "agent_on_failures": 0.812,
+          "step_on_failures": 0.75,
+          "false_alarms": null,
+          "n": 90,
+          "n_failures": 16,
+          "n_honest": 0
+        },
+        "3 ADR records": {
+          "agent": 1.0,
+          "step": 1.0,
+          "agent_on_failures": 1.0,
+          "step_on_failures": 1.0,
+          "false_alarms": null,
+          "n": 90,
+          "n_failures": 16,
+          "n_honest": 0
+        }
+      },
+      "false_completion": {
+        "2a logs, generic heuristic": {
+          "agent": 0.022,
+          "step": 0.0,
+          "agent_on_failures": 0.333,
+          "step_on_failures": 0.0,
+          "false_alarms": null,
+          "n": 45,
+          "n_failures": 3,
+          "n_honest": 0
+        },
+        "2b logs + runbook": {
+          "agent": 0.667,
+          "step": 0.667,
+          "agent_on_failures": 1.0,
+          "step_on_failures": 1.0,
+          "false_alarms": null,
+          "n": 45,
+          "n_failures": 3,
+          "n_honest": 0
+        },
+        "3 ADR records": {
+          "agent": 1.0,
+          "step": 1.0,
+          "agent_on_failures": 1.0,
+          "step_on_failures": 1.0,
+          "false_alarms": null,
+          "n": 45,
+          "n_failures": 3,
+          "n_honest": 0
+        }
+      },
+      "none": {
+        "2a logs, generic heuristic": {
+          "agent": null,
+          "step": null,
+          "agent_on_failures": null,
+          "step_on_failures": null,
+          "false_alarms": 0.0,
+          "n": 0,
+          "n_failures": 0,
+          "n_honest": 75
+        },
+        "2b logs + runbook": {
+          "agent": null,
+          "step": null,
+          "agent_on_failures": null,
+          "step_on_failures": null,
+          "false_alarms": 0.0,
+          "n": 0,
+          "n_failures": 0,
+          "n_honest": 75
+        },
+        "3 ADR records": {
+          "agent": null,
+          "step": null,
+          "agent_on_failures": null,
+          "step_on_failures": null,
+          "false_alarms": 0.0,
+          "n": 0,
+          "n_failures": 0,
+          "n_honest": 75
+        }
+      },
+      "skipped_check": {
+        "2a logs, generic heuristic": {
+          "agent": 0.0,
+          "step": 0.0,
+          "agent_on_failures": null,
+          "step_on_failures": null,
+          "false_alarms": null,
+          "n": 23,
+          "n_failures": 0,
+          "n_honest": 0
+        },
+        "2b logs + runbook": {
+          "agent": 1.0,
+          "step": 1.0,
+          "agent_on_failures": null,
+          "step_on_failures": null,
+          "false_alarms": null,
+          "n": 23,
+          "n_failures": 0,
+          "n_honest": 0
+        },
+        "3 ADR records": {
+          "agent": 1.0,
+          "step": 1.0,
+          "agent_on_failures": null,
+          "step_on_failures": null,
+          "false_alarms": null,
+          "n": 23,
+          "n_failures": 0,
+          "n_honest": 0
+        }
+      },
+      "wrong_value": {
+        "2a logs, generic heuristic": {
+          "agent": 0.418,
+          "step": 0.403,
+          "agent_on_failures": 0.575,
+          "step_on_failures": 0.55,
+          "false_alarms": null,
+          "n": 67,
+          "n_failures": 40,
+          "n_honest": 0
+        },
+        "2b logs + runbook": {
+          "agent": 0.821,
+          "step": 0.821,
+          "agent_on_failures": 0.85,
+          "step_on_failures": 0.85,
+          "false_alarms": null,
+          "n": 67,
+          "n_failures": 40,
+          "n_honest": 0
+        },
+        "3 ADR records": {
+          "agent": 1.0,
+          "step": 1.0,
+          "agent_on_failures": 1.0,
+          "step_on_failures": 1.0,
+          "false_alarms": null,
+          "n": 67,
+          "n_failures": 40,
+          "n_honest": 0
+        }
+      }
+    }
+  },
+  "e2e": {
+    "3": {
+      "cases": 100,
+      "error_rate_observe": 0.29,
+      "error_rate_enforced": 0.19,
+      "honest_cases_halted": 0,
+      "faulted_cases_halted_without_an_error": 46
+    },
+    "4": {
+      "cases": 100,
+      "error_rate_observe": 0.19,
+      "error_rate_enforced": 0.13,
+      "honest_cases_halted": 0,
+      "faulted_cases_halted_without_an_error": 45
+    },
+    "5": {
+      "cases": 100,
+      "error_rate_observe": 0.11,
+      "error_rate_enforced": 0.08,
+      "honest_cases_halted": 0,
+      "faulted_cases_halted_without_an_error": 48
+    }
+  },
+  "completion_gap": {
+    "3": {
+      "agent_claimed_complete": 1.0,
+      "agent_verified": 0.617,
+      "agent_gap_points": 38.3,
+      "pipeline_claimed_complete": 1.0,
+      "pipeline_verified": 0.44,
+      "pipeline_gap_points": 56.0
+    },
+    "4": {
+      "agent_claimed_complete": 1.0,
+      "agent_verified": 0.632,
+      "agent_gap_points": 36.8,
+      "pipeline_claimed_complete": 1.0,
+      "pipeline_verified": 0.49,
+      "pipeline_gap_points": 51.0
+    },
+    "5": {
+      "agent_claimed_complete": 1.0,
+      "agent_verified": 0.684,
+      "agent_gap_points": 31.6,
+      "pipeline_claimed_complete": 1.0,
+      "pipeline_verified": 0.49,
+      "pipeline_gap_points": 51.0
+    }
+  },
+  "overhead": {
+    "chars_per_record": 2458,
+    "chars_per_agent_logs": 303,
+    "chars_per_agent_trace": 189,
+    "record_vs_logs": 8.11,
+    "token_estimate_per_record": 615,
+    "token_estimate_per_agent_logs": 76,
+    "note": "token counts are chars/4 estimates of stored size, not tokens an agent spent"
+  },
+  "latency": {
+    "store_write_signed_ms": {
+      "p50": 0.31,
+      "p99": 0.368,
+      "n": 500
+    },
+    "store_write_unsigned_ms": {
+      "p50": 0.245,
+      "p99": 0.303,
+      "n": 500
+    },
+    "sign_seal_ms": {
+      "p50": 0.0583,
+      "p99": 0.0705,
+      "n": 5000
+    },
+    "machine": "Darwin arm64"
+  },
+  "upstream_origin": {
+    "failures": 59,
+    "originating_upstream_of_the_decider": 25,
+    "share": 0.424,
+    "note": "set by the fault distribution this simulation was given; not a finding about agents"
+  }
+}
