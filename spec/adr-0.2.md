@@ -1,7 +1,7 @@
 # Agent Decision Record (ADR) — specification 0.2
 
 Status: draft · 27 September 2026 · licensed CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/).
-The reference implementation is `warrantai` (Apache 2.0); ADR 0.2 support is in development for its
+The reference implementation is `warrantai` (Apache 2.0), which implements ADR 0.2 from its
 0.7.0 release.
 
 An Agent Decision Record is a tamper-evident record of one consequential decision made by a software
