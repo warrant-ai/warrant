@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.1 (2026-09-27)
 
 - **Key validity is judged when a record is sealed, not when the decision was made.** A signing store now stamps `seal.sealed_at` and signs it with the hash (`"adr/0.2 seal\n" + hash + "\n" + sealed_at`). In 0.7.0 a key was checked against the record's `timestamp`, so a key created today could not validly sign a record of a decision made last month: every imported record failed verification, and a revoked key could still sign records dated before its revocation. Found by the first backfill of real historical approvals. Records signed by 0.7.0 carry no `sealed_at` and still verify under the original message; both SDKs accept both forms, and `conformance/adr-vectors.json` gains a `seal_sealed_at` vector. The spec states the remaining limit: `sealed_at` is signed, but only a witnessed checkpoint fixes which records existed before a revocation
 ## 0.7.0 (2026-09-27)
