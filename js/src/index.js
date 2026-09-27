@@ -13,6 +13,6 @@ export { Emitter, PermanentSinkError, SinkError } from "./emit.js";
 export { HttpSink } from "./sinks.js";
 export { Redactor, TEXT_FIELDS } from "./redaction.js";
 export { SALT_BYTES, canonicalJson, contentBytes, contentHash, recordHash, saltedHash } from "./hashing.js";
-export { CHECKPOINT_CONTEXT, Keyring, PublicKey, SEAL_CONTEXT, SigningError, SigningKey, keyIdFor, verifySeal } from "./signing.js";
+export { CHECKPOINT_CONTEXT, Keyring, PublicKey, SEAL_CONTEXT, SigningError, SigningKey, keyIdFor, sealMessage, verifySeal } from "./signing.js";
 export { consistencyProof, inclusionProof, merkleRoot, verifyConsistency, verifyInclusion } from "./merkle.js";
 export { deterministicUlid, ulid } from "./ids.js";

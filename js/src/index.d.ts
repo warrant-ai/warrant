@@ -251,11 +251,14 @@ export class SigningKey {
   readonly keyId: string;
   readonly public: PublicKey;
   sign(message: string): string;
-  signSeal(hash: string): { key_id: string; signature: string };
+  /** `sealedAt` (0.7.1 on) is signed with the hash; key validity is judged at sealing time. */
+  signSeal(hash: string, sealedAt?: string): { key_id: string; signature: string; sealed_at?: string };
 }
 
 export type SealCheck = { ok: true; issuer: string } | { ok: false; reason: string };
-/** Checks the issuer signature over `seal.hash`; whether the hash matches the body is the chain check's job. */
+/** What an issuer signs: context, hash, and `\n` + sealedAt when present (ADR 5.1). */
+export function sealMessage(hash: string, sealedAt?: string | null): string;
+/** Checks the issuer signature over `seal.hash` (and `sealed_at`); whether the hash matches the body is the chain check's job. */
 export function verifySeal(record: DecisionRecord, keyring: Keyring): SealCheck;
 
 /** RFC 9162 Merkle functions over hex leaf hashes, byte-identical to the Python reference. */

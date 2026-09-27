@@ -74,6 +74,12 @@
     "message": "adr/0.2 seal\n774967d36878a4c709f94024dad5fc3ff5b57c3464c4dca0518c177a5a51ce4e",
     "signature": "mWE/P/PZyjFMO5CYW+Z+qSj2owvSGGHFtLegAnIbKDsr1RZGTq2NIQN/qrIkIkTHDDQxKFJ/FdKmH79PbMgFCA=="
   },
+  "seal_sealed_at": {
+    "hash": "774967d36878a4c709f94024dad5fc3ff5b57c3464c4dca0518c177a5a51ce4e",
+    "sealed_at": "2026-09-27T12:00:00.000Z",
+    "message": "adr/0.2 seal\n774967d36878a4c709f94024dad5fc3ff5b57c3464c4dca0518c177a5a51ce4e\n2026-09-27T12:00:00.000Z",
+    "signature": "5v9w4CL6ZI8SXZwYBlsVBTwao1Kq7hvxtrRRY7KE3gg8TTmSZlzwsmJ4F7tO5PNtRpDFbtfgME/Pzlgx8uiZCg=="
+  },
   "checkpoint_message": {
     "body": {
       "spec": "adr/0.2",

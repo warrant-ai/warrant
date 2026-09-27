@@ -215,3 +215,61 @@ def test_the_conformance_vectors_still_match_this_implementation():
         assert [p.hex() for p in inclusion_proof(v["index"], leaves[: v["size"]])] == v["proof"]
     for v in vectors["merkle"]["consistency"]:
         assert [p.hex() for p in consistency_proof(v["from"], leaves[: v["to"]])] == v["proof"]
+
+
+# -- sealing time (0.7.1) ------------------------------------------------------------------------
+
+
+def test_an_imported_record_of_a_past_decision_is_validly_signed_by_a_new_key(tmp_path):
+    """Key validity is judged when the record was sealed, not when the decision it describes was made."""
+    key = SigningKey.generate("demo-bank")  # not_before: now
+    store = SQLiteStore(tmp_path / "r.db", signer=key)
+    store.write([_record(1, timestamp="2025-01-15T10:00:00.000Z", origin="imported")])
+    record = next(store.iter_records())
+    store.close()
+    assert record["seal"]["sealed_at"] > record["timestamp"]
+    assert verify_seal(record, Keyring([key.public])) == (True, "demo-bank")
+
+
+def test_a_key_revoked_before_sealing_fails_even_for_an_old_decision(tmp_path):
+    key = SigningKey.generate("demo-bank")
+    store = SQLiteStore(tmp_path / "r.db", signer=key)
+    store.write([_record(1, timestamp="2025-01-15T10:00:00.000Z")])
+    record = next(store.iter_records())
+    store.close()
+    revoked = PublicKey(key.issuer, key.key_id, key.public.raw, None, "2026-01-01T00:00:00Z")
+    ok, why = verify_seal(record, Keyring([revoked]))
+    assert not ok and "revoked" in why
+
+
+def test_the_sealing_time_is_signed_so_it_cannot_be_moved(tmp_path):
+    key = SigningKey.generate("demo-bank")
+    store = SQLiteStore(tmp_path / "r.db", signer=key)
+    store.write([_record(1)])
+    record = next(store.iter_records())
+    store.close()
+    moved = {**record, "seal": {**record["seal"], "sealed_at": "2099-01-01T00:00:00.000Z"}}
+    assert "does not verify" in verify_seal(moved, Keyring([key.public]))[1]
+
+
+def test_a_0_7_0_signature_without_a_sealing_time_still_verifies():
+    from warrant.hashing import record_hash
+    from warrant.signing import SEAL_CONTEXT
+
+    key = SigningKey("demo-bank", bytes(range(32)), not_before="2026-01-01T00:00:00Z")
+    record = {**_record(1), "sequence": 1}
+    h = record_hash(record, None)
+    record["seal"] = {"prev_hash": None, "hash": h, "key_id": key.key_id, "signature": key.sign(SEAL_CONTEXT + h.encode())}
+    assert verify_seal(record, Keyring([key.public]))[0]
+
+
+def test_the_sealed_at_vector_matches():
+    from pathlib import Path
+
+    from warrant.signing import seal_message
+
+    vectors = json.loads((Path(__file__).resolve().parents[2] / "conformance" / "adr-vectors.json").read_text())
+    key = SigningKey(vectors["key"]["issuer"], bytes.fromhex(vectors["key"]["private_key_hex"]))
+    v = vectors["seal_sealed_at"]
+    assert seal_message(v["hash"], v["sealed_at"]).decode() == v["message"]
+    assert key.sign(seal_message(v["hash"], v["sealed_at"])) == v["signature"]

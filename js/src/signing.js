@@ -147,9 +147,20 @@ export class SigningKey {
   }
 
   /** The `seal` fields a signing store adds: key_id and signature. */
-  signSeal(hash) {
-    return { key_id: this.keyId, signature: this.sign(SEAL_CONTEXT + hash) };
+  /** `sealedAt` (0.7.1 on) is signed with the hash, so key validity is judged at sealing time. */
+  signSeal(hash, sealedAt) {
+    const out = { key_id: this.keyId, signature: this.sign(sealMessage(hash, sealedAt)) };
+    if (sealedAt !== undefined && sealedAt !== null) out.sealed_at = sealedAt;
+    return out;
   }
+}
+
+/**
+ * What an issuer signs: the seal context and hash, then a newline and `sealed_at` when present.
+ * Records signed by 0.7.0 carry no `sealed_at` and keep the original message.
+ */
+export function sealMessage(hash, sealedAt) {
+  return SEAL_CONTEXT + hash + (sealedAt !== undefined && sealedAt !== null ? `\n${sealedAt}` : "");
 }
 
 /**
@@ -164,11 +175,11 @@ export function verifySeal(record, keyring) {
   if (!key) return { ok: false, reason: `signed by unknown key ${seal.key_id}` };
   let valid, why;
   try {
-    [valid, why] = key.validAt(record.timestamp ?? "");
+    [valid, why] = key.validAt(seal.sealed_at ?? record.timestamp ?? "");
   } catch (err) {
     return { ok: false, reason: err.message };
   }
   if (!valid) return { ok: false, reason: why };
-  if (!key.verify(SEAL_CONTEXT + String(seal.hash ?? ""), seal.signature)) return { ok: false, reason: `signature does not verify under ${seal.key_id}` };
+  if (!key.verify(sealMessage(String(seal.hash ?? ""), seal.sealed_at), seal.signature)) return { ok: false, reason: `signature does not verify under ${seal.key_id}` };
   return { ok: true, issuer: key.issuer };
 }

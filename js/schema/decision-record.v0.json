@@ -585,12 +585,17 @@
         },
         "signature": {
           "type": "string",
-          "description": "base64 Ed25519 signature over 'adr/0.2 seal\\n' + hash (ADR 5.1)."
+          "description": "base64 Ed25519 signature over 'adr/0.2 seal\\n' + hash, followed by '\\n' + sealed_at when sealed_at is present (ADR 5.1)."
         },
         "key_id": {
           "type": "string",
           "pattern": "^ed25519:[a-f0-9]{16}$",
           "description": "Issuer key that produced signature."
+        },
+        "sealed_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When the issuer's store sealed and signed the record; signed with the hash (ADR 5.1). Key validity is judged at this time."
         }
       }
     },

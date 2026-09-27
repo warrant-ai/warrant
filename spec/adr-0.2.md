@@ -149,11 +149,14 @@ seal.hash = SHA-256( canonical_json(record without seal) || "\n" || prev_hash_or
 A signing issuer then sets
 
 ```
+seal.sealed_at = the time the issuer's store sealed the record (RFC 3339, UTC)
 seal.key_id    = "ed25519:" || first 16 hex characters of SHA-256(raw public key)
-seal.signature = base64( Ed25519.sign( "adr/0.2 seal\n" || seal.hash ) )
+seal.signature = base64( Ed25519.sign( "adr/0.2 seal\n" || seal.hash || "\n" || seal.sealed_at ) )
 ```
 
-The signature is outside the hashed body, so a record can be verified with or without it.
+The signature is outside the hashed body, so a record can be verified with or without it. A record
+signed without `sealed_at` (Warrant 0.7.0) signs `"adr/0.2 seal\n" || seal.hash` alone; verifiers MUST
+accept both forms.
 
 ### 5.2 Keys and revocation
 
@@ -165,8 +168,13 @@ An issuer publishes its public keys as
            "revoked_at": null}]}
 ```
 
-A signature by a key is valid only for records whose `timestamp` is at or after `not_before` and,
-if the key is revoked, before `revoked_at`.
+A signature by a key is valid only for records sealed (`seal.sealed_at`, or `timestamp` when absent)
+at or after `not_before` and, if the key is revoked, before `revoked_at`. Validity follows the sealing
+time, not the decision time: a record imported today describes a past decision but was signed today.
+
+`sealed_at` is signed, so it cannot be moved without the key. It does not stop the holder of a key
+backdating a record signed after the key was revoked; only a checkpoint co-signed by a witness before
+the revocation (section 6) fixes which records existed by then.
 
 ### 5.3 What signing does and does not prove
 
@@ -230,6 +238,12 @@ and why it stops there.
 - Admissibility of records as electronic evidence in court (in India, section 63 of the Bharatiya
   Sakshya Adhiniyam 2023) requires a legal opinion that this specification does not provide.
 - Signing alone does not stop an issuer rewriting its own history (section 5.3).
+
+## Changes within 0.2
+
+- Warrant 0.7.1: the store signs `seal.sealed_at` with the hash, and key validity is judged at the
+  sealing time (section 5). Found when the first imported records, of decisions made before the
+  issuer's key existed, failed verification.
 
 ## Changes from 0.1
 

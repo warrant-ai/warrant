@@ -208,9 +208,12 @@ class SigningKey:
     def sign(self, message: bytes) -> str:
         return base64.b64encode(self._key.sign(message)).decode("ascii")
 
-    def sign_seal(self, record_hash: str) -> Dict[str, str]:
+    def sign_seal(self, record_hash: str, sealed_at: Optional[str] = None) -> Dict[str, str]:
         """The ``seal`` fields a signing store adds: key_id and signature."""
-        return {"key_id": self.key_id, "signature": self.sign(SEAL_CONTEXT + record_hash.encode("ascii"))}
+        out = {"key_id": self.key_id, "signature": self.sign(seal_message(record_hash, sealed_at))}
+        if sealed_at is not None:
+            out["sealed_at"] = sealed_at
+        return out
 
 
 class Keyring:
@@ -264,6 +267,20 @@ class Keyring:
         Path(path).write_text(json.dumps({"keys": [k.to_dict() for k in self._keys.values()]}, indent=2) + "\n", encoding="utf-8")
 
 
+def seal_message(record_hash: str, sealed_at: Optional[str] = None) -> bytes:
+    """What an issuer signs. With ``sealed_at`` (0.7.1 on), the sealing time is signed too.
+
+    Key validity must be judged at the moment of sealing, not at the decision's timestamp: an
+    imported record describes a past decision but is sealed today, and a key revoked last week must
+    not be able to sign a record dated before its revocation. So the store stamps ``seal.sealed_at``
+    and signs it. Records signed by 0.7.0 have no ``sealed_at`` and keep the original message.
+    """
+    message = SEAL_CONTEXT + record_hash.encode("ascii")
+    if sealed_at is not None:
+        message += b"\n" + sealed_at.encode("ascii")
+    return message
+
+
 def verify_seal(record: Mapping[str, Any], keyring: Keyring) -> Tuple[bool, str]:
     """Check a sealed record's issuer signature. Returns ``(ok, reason)``.
 
@@ -281,12 +298,13 @@ def verify_seal(record: Mapping[str, Any], keyring: Keyring) -> Tuple[bool, str]
     if key is None:
         return False, f"signed by unknown key {key_id}"
     try:
-        valid, why = key.valid_at(record.get("timestamp", ""))
+        sealed_at = seal.get("sealed_at")
+        valid, why = key.valid_at(sealed_at or record.get("timestamp", ""))
     except SigningError as exc:
         return False, str(exc)
     if not valid:
         return False, why
-    if not key.verify(SEAL_CONTEXT + str(seal.get("hash", "")).encode("ascii"), signature):
+    if not key.verify(seal_message(str(seal.get("hash", "")), seal.get("sealed_at")), signature):
         return False, f"signature does not verify under {key_id}"
     return True, key.issuer
 

@@ -10,7 +10,7 @@ from pathlib import Path
 
 from warrant.hashing import canonical_json, content_hash, record_hash, salted_hash
 from warrant.merkle import consistency_proof, inclusion_proof, root
-from warrant.signing import CHECKPOINT_CONTEXT, SEAL_CONTEXT, SigningKey
+from warrant.signing import CHECKPOINT_CONTEXT, SEAL_CONTEXT, SigningKey, seal_message
 
 OUT = Path(__file__).resolve().parents[1] / "conformance" / "adr-vectors.json"
 
@@ -34,6 +34,9 @@ vectors = {
     "key": {"issuer": key.issuer, "private_key_hex": bytes(range(32)).hex(), "public_key_b64": key.public.to_dict()["public_key"], "key_id": key.key_id},
     "salted": [{"content": c, "salt_hex": salt.hex(), "plain": content_hash(c), "salted": salted_hash(c, salt)} for c in contents],
     "seal": {"record": record, "hash": h, "message": (SEAL_CONTEXT + h.encode()).decode(), "signature": key.sign(SEAL_CONTEXT + h.encode())},
+    "seal_sealed_at": {"hash": h, "sealed_at": "2026-09-27T12:00:00.000Z",
+                       "message": seal_message(h, "2026-09-27T12:00:00.000Z").decode(),
+                       "signature": key.sign(seal_message(h, "2026-09-27T12:00:00.000Z"))},
     "checkpoint_message": {"body": {"spec": "adr/0.2", "kind": "checkpoint", "tree_size": 3, "root": "ab" * 32},
                            "message": (CHECKPOINT_CONTEXT + canonical_json({"spec": "adr/0.2", "kind": "checkpoint", "tree_size": 3, "root": "ab" * 32}).encode()).decode()},
     "merkle": {

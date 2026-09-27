@@ -7,7 +7,7 @@ import { join } from "node:path";
 import {
   CHECKPOINT_CONTEXT, CitationError, Keyring, PublicKey, SEAL_CONTEXT, SigningKey, Warrant,
   canonicalJson, consistencyProof, contentHash, inclusionProof, keyIdFor, merkleRoot, recordHash,
-  saltedHash, validate, verifyConsistency, verifyInclusion, verifySeal,
+  saltedHash, sealMessage, validate, verifyConsistency, verifyInclusion, verifySeal,
 } from "../src/index.js";
 
 const vectors = JSON.parse(readFileSync(new URL("../../conformance/adr-vectors.json", import.meta.url), "utf8"));
@@ -37,6 +37,20 @@ test("the seal hash, message and exact signature match the vectors", () => {
   assert.equal(SEAL_CONTEXT + hash, message);
   assert.equal(vectorKey.sign(message), signature);
   assert.deepEqual(vectorKey.signSeal(hash), { key_id: vectors.key.key_id, signature });
+});
+
+test("a signed sealing time matches the vector and moves validity to sealing time", () => {
+  const v = vectors.seal_sealed_at;
+  assert.equal(sealMessage(v.hash, v.sealed_at), v.message);
+  assert.deepEqual(vectorKey.signSeal(v.hash, v.sealed_at), { key_id: vectors.key.key_id, signature: v.signature, sealed_at: v.sealed_at });
+  const entry = { issuer: vectors.key.issuer, alg: "Ed25519", public_key: vectors.key.public_key_b64, key_id: vectors.key.key_id, not_before: "2026-09-01T00:00:00Z" };
+  const ring = Keyring.fromKeySets({ keys: [entry] });
+  // A record of a decision made before the key existed, sealed after it: valid.
+  const record = { ...vectors.seal.record, timestamp: "2025-01-01T00:00:00.000Z" };
+  const sealed = { ...record, seal: { prev_hash: null, hash: v.hash, key_id: vectors.key.key_id, signature: v.signature, sealed_at: v.sealed_at } };
+  assert.equal(verifySeal(sealed, ring).ok, true);
+  const moved = { ...sealed, seal: { ...sealed.seal, sealed_at: "2026-09-28T00:00:00.000Z" } };
+  assert.match(verifySeal(moved, ring).reason, /does not verify/);
 });
 
 test("the checkpoint message matches the vectors", () => {

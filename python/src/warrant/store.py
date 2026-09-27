@@ -103,7 +103,10 @@ def seal_record(record: Dict[str, Any], stream_seq: int, prev_hash: Optional[str
     sealed["sequence"] = stream_seq
     seal: Dict[str, Any] = {"prev_hash": prev_hash, "hash": record_hash(sealed, prev_hash)}
     if signer is not None:
-        seal.update(signer.sign_seal(seal["hash"]))
+        from datetime import datetime, timezone
+
+        sealed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        seal.update(signer.sign_seal(seal["hash"], sealed_at))
     sealed["seal"] = seal
     return sealed
 
