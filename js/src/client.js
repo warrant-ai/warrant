@@ -471,6 +471,21 @@ export class Decision {
     if (note) this._human.note = note;
   }
 
+  /**
+   * Record that a named person decided this, having been shown exactly `shown` (ADR rule 7): for
+   * decisions where the person's act is the decision. `shown` holds sha256 digests of the material.
+   */
+  humanReview({ reviewer, shown, verdict = "approve", note, at } = {}) {
+    this._assertOpen();
+    requireText(reviewer, "reviewer");
+    if (!HUMAN_VERDICTS.includes(verdict)) throw new RangeError(`verdict must be one of ${HUMAN_VERDICTS.join(", ")}`);
+    if (!Array.isArray(shown) || shown.some((d) => typeof d !== "string" || !/^[a-f0-9]{64}$/.test(d))) {
+      throw new TypeError("shown must be an array of sha256 digests of the material the reviewer saw");
+    }
+    this._human = { required: true, reviewer, verdict, at: asTimestamp(at), shown: [...shown] };
+    if (note) this._human.note = note;
+  }
+
   _assertOpen() {
     if (this._closed) throw new Error(`decision ${this.recordId} is closed`);
   }

@@ -1,7 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.8.0 (2026-09-27)
 
+The warrant engine in JavaScript, so a TypeScript service can record warranted decisions live.
+
+- **`human_review()` / `humanReview()`**: record that a named person decided this, having been shown exactly these digests (ADR rule 7), for decisions where the person's act *is* the decision, such as a reviewer approving a determination. A `human_review` obligation is met by it
 - **The JavaScript SDK now has the whole warrant engine**: obligations and retention from policy bundles, the seven admissibility rules, `decision.warrant()`, fail-closed `commit()` and enforcement on `act()`, and lifecycle `transition()`. `conformance/admissibility-cases.json` (50 cases generated from the Python implementation, pinned by a Python test) is reproduced exactly by the JS suite, so the two SDKs cannot disagree about a verdict. JS has no store, so `transition()` takes `fromState`, and the decision record to leave `pending_evidence`
 - **A client recording to a collector can no longer warrant a decision that is missing evidence.** `Warrant.transition()` without a local store did not check a move from `pending_evidence` to `warranted`; it now requires the decision record (`decision=`) and applies the same rule as a local store. Found by the JS port
 ## 0.7.1 (2026-09-27)

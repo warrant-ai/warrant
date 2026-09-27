@@ -136,6 +136,8 @@ export class Decision {
   /** Act only on a warrant; throws `NotWarranted` otherwise. */
   commit(action: string, options?: { summary?: string; costCentre?: string; alternatives?: string[] }): void;
   requireHuman(options?: { reviewer?: string; note?: string }): void;
+  /** A named person decided this, having been shown exactly `shown` (sha256 digests); rule 7. */
+  humanReview(options: { reviewer: string; shown: string[]; verdict?: "approve" | "reject" | "amend"; note?: string; at?: string | Date }): void;
   /** The hex salt behind a sensitive item's digest. */
   saltFor(digest: string): string | undefined;
   /** What the agent asserts. Never evidence, here or downstream. */

@@ -553,3 +553,23 @@ def test_a_collector_client_cannot_warrant_a_decision_missing_evidence(world):
             remote.transition(d.record_id, "warranted", decided_by="human:x", from_state="pending_evidence", reviewer="x", shown=[], decision=decision)
     finally:
         remote.close()
+
+
+def test_a_reviewer_whose_approval_is_the_decision_meets_the_human_obligation(tmp_path):
+    w = Warrant("s", tenant="t", store=tmp_path / "r.db", agent=AgentInfo("engine", "1"), flush_interval=0.02)
+    with w.decide("frw.withholding.determination", subject="FRW-1") as d:
+        d.obligation("OB-REVIEW", requires="human_review")
+        seen = d.evidence("trc", uri="frw://case/1/trc", type="document", provider="foreign-tax-authority", content="trc")
+        d.human_review("asha@example.test", shown=[seen], note="treaty rate agreed")
+        state = d.warrant()
+    assert state.state == "warranted" and state.met == ("OB-REVIEW",)
+    with w.decide("frw.withholding.determination", subject="FRW-2") as d:
+        with pytest.raises(ValueError, match="sha256"):
+            d.human_review("asha@example.test", shown=["not-a-digest"])
+        with pytest.raises(ValueError, match="verdict"):
+            d.human_review("asha@example.test", shown=[], verdict="maybe")
+    w.flush()
+    record = [r for r in w.store.iter_records() if r["decision"]["subject"] == "FRW-1"][0]
+    w.close()
+    assert record["human"]["reviewer"] == "asha@example.test" and record["human"]["shown"] == [seen]
+    assert record["verdict"]["state"] == "warranted"

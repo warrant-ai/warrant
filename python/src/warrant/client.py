@@ -733,6 +733,34 @@ class Decision:
         if note:
             self._human["note"] = note
 
+    def human_review(
+        self,
+        reviewer: str,
+        *,
+        shown: Sequence[str],
+        verdict: str = "approve",
+        note: Optional[str] = None,
+        at: Union[str, datetime, None] = None,
+    ) -> None:
+        """Record that a named person decided this, having been shown exactly ``shown`` (ADR rule 7).
+
+        For decisions where the person's act *is* the decision (a reviewer approving a determination),
+        rather than one that arrives later as a ``human_verdict`` or a transition. ``shown`` is the
+        list of digests of the material they were shown; each must be on this record for a
+        ``human_review`` obligation to be met.
+        """
+        self._assert_open()
+        if not isinstance(reviewer, str) or not reviewer:
+            raise ValueError("reviewer must be a non-empty string")
+        if verdict not in HUMAN_VERDICTS:
+            raise ValueError(f"verdict must be one of {HUMAN_VERDICTS}, got {verdict!r}")
+        shown_list = list(shown)
+        if any(not isinstance(d, str) or not SHA256_RE.match(d) for d in shown_list):
+            raise ValueError("shown must be sha256 digests of the material the reviewer saw")
+        self._human = {"required": True, "reviewer": reviewer, "verdict": verdict, "at": _as_timestamp(at), "shown": shown_list}
+        if note:
+            self._human["note"] = note
+
     @property
     def verdict(self) -> Optional[Verdict]:
         return self._verdict

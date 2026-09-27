@@ -169,3 +169,24 @@ test("an obligation whose condition cannot evaluate applies", async () => {
   const engine = new CelPolicyEngine(await PolicyBundle.load(file, { logger: quiet }), { logger: quiet });
   assert.deepEqual(engine.evaluate("c.x", {}).obligations.map((o) => o.id), ["A"]);
 });
+
+test("a reviewer whose approval is the decision meets the human obligation", async () => {
+  const sink = { records: [], write(batch) { this.records.push(...batch); } };
+  const w = new Warrant("frw", { tenant: "t", store: sink, agent: { name: "engine", version: "1" }, spillDir: await mkdtemp(join(tmpdir(), "hr-")), logger: quiet });
+  let state;
+  await w.decide("frw.withholding.determination", { subject: "FRW-1" }, (d) => {
+    d.obligation("OB-REVIEW", { requires: "human_review" });
+    const seen = d.evidence("trc", { uri: "frw://case/1/trc", type: "document", provider: "foreign-tax-authority", content: "trc" });
+    d.humanReview({ reviewer: "asha@example.test", shown: [seen], note: "treaty rate agreed" });
+    state = d.warrant();
+    assert.throws(() => d.humanReview({ reviewer: "asha@example.test", shown: ["not-a-digest"] }), /sha256/);
+    assert.throws(() => d.humanReview({ reviewer: "asha@example.test", shown: [], verdict: "maybe" }), /verdict/);
+  });
+  await w.flush();
+  assert.equal(state.state, "warranted");
+  const { _blobs, ...record } = sink.records[0];
+  assert.equal(record.human.reviewer, "asha@example.test");
+  assert.equal(record.verdict.state, "warranted");
+  validate(record);
+  await w.close();
+});
