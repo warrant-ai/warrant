@@ -60,7 +60,8 @@ export class Verdict {
 
 export interface PolicyEngine {
   /** Synchronous and in-process: this runs on the agent's path. */
-  evaluate(decisionClass: string, inputs: Readonly<Record<string, unknown>>): Verdict;
+  /** `at` is the decision's opening time, for engines that select a policy version by date. */
+  evaluate(decisionClass: string, inputs: Readonly<Record<string, unknown>>, at?: string): Verdict;
 }
 
 export interface Sink {

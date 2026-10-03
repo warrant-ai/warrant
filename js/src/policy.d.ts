@@ -33,6 +33,10 @@ export interface Policy {
   title?: string;
   tests: PolicyTest[];
   source: string;
+  /** In force from this moment (inclusive). A policy with neither bound is in force always. */
+  effectiveFrom?: string;
+  /** In force until this moment (exclusive). */
+  effectiveTo?: string;
   /** What has to be true for a decision of these classes to be warranted. */
   obligations: ObligationSpec[];
   /** Acting without a warrant fails closed. */
@@ -69,14 +73,19 @@ export class PolicyBundle {
   /** Load every `*.yaml`, `*.yml` and `*.json` file in a directory, or one file. */
   static load(path: string, options?: { logger?: Logger }): Promise<PolicyBundle>;
   readonly policies: Policy[];
-  /** Exact class match first, then the longest matching `prefix.*` pattern. */
-  policyFor(decisionClass: string): Policy | undefined;
+  /**
+   * The policy in force for this class at `at` (the decision's own timestamp; now when omitted):
+   * exact class match first, then the longest matching `prefix.*` pattern.
+   */
+  policyFor(decisionClass: string, at?: string): Policy | undefined;
+  /** Every dated version claiming this class exactly, newest first. */
+  versionsFor(decisionClass: string): Policy[];
 }
 
 export class CelPolicyEngine implements PolicyEngine {
   constructor(bundle: PolicyBundle, options?: { logger?: Logger });
   readonly bundle: PolicyBundle;
-  evaluate(decisionClass: string, inputs: Readonly<Record<string, unknown>>): Verdict;
+  evaluate(decisionClass: string, inputs: Readonly<Record<string, unknown>>, at?: string): Verdict;
 }
 
 export function runPolicyTests(bundle: PolicyBundle, options?: { logger?: Logger }): PolicyTestResult[];

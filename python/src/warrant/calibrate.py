@@ -243,6 +243,7 @@ def calibrate(
     *,
     correct_when: str,
     stream: Optional[str] = None,
+    tenant: Optional[str] = None,
     answer: Optional[str] = None,
     buckets: int = 10,
     by: Optional[str] = None,
@@ -272,7 +273,7 @@ def calibrate(
         stream=stream, answer=answer, correct_when=correct_when, dimension=by, where=where
     )
     grouped: Dict[str, List[Point]] = {}
-    for record in iter_joined(store, stream):
+    for record in iter_joined(store, stream, tenant):
         if included is not None and not included(record):
             continue
         report.decisions += 1
@@ -345,11 +346,11 @@ def _compile(expression: str) -> Callable[[Dict[str, Any]], bool]:
     return predicate
 
 
-def coverage_of(store: Any, stream: Optional[str] = None) -> Coverage:
+def coverage_of(store: Any, stream: Optional[str] = None, tenant: Optional[str] = None) -> Coverage:
     """Re-exported so a caller wanting only the depth metric need not reach into two modules."""
     from warrant.outcomes import coverage
 
-    return coverage(store, stream=stream)
+    return coverage(store, stream=stream, tenant=tenant)
 
 
 def gate(report: CalibrationReport, *, max_ece: Optional[float] = None, max_mce: Optional[float] = None) -> List[str]:

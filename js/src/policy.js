@@ -147,6 +147,48 @@ function toCel(value) {
   return value;
 }
 
+/**
+ * A date or timestamp, normalised so string comparison against a record timestamp is correct.
+ * A bare `2026-10-01` becomes `2026-10-01T00:00:00Z`, as the Python SDK reads it.
+ */
+function asDate(name, value, field) {
+  if (value === undefined || value === null) return undefined;
+  let text = value instanceof Date ? value.toISOString() : String(value).trim();
+  if (!text) return undefined;
+  if (text.length === 10) text = `${text}T00:00:00Z`;
+  if (!/^\d{4}-\d{2}-\d{2}T/.test(text) || Number.isNaN(Date.parse(text))) {
+    throw new PolicyError(`${name}: ${field} is not a date or timestamp: ${JSON.stringify(value)}`);
+  }
+  return text;
+}
+
+const dated = (policy) => policy.effectiveFrom !== undefined || policy.effectiveTo !== undefined;
+
+/** Was this version in force at `at`? An undated policy is in force always. */
+function covers(policy, at) {
+  if (policy.effectiveFrom !== undefined && at < policy.effectiveFrom) return false;
+  if (policy.effectiveTo !== undefined && at >= policy.effectiveTo) return false;
+  return true;
+}
+
+function windowOf(policy) {
+  if (!dated(policy)) return "always";
+  return `${policy.effectiveFrom ?? "the beginning"} to ${policy.effectiveTo ?? "further notice"}`;
+}
+
+/** Do two versions of a policy both govern at some moment? Undated means always. */
+function overlaps(a, b) {
+  if (!dated(a) || !dated(b)) return true;
+  return (a.effectiveFrom ?? "") < (b.effectiveTo ?? "9999") && (b.effectiveFrom ?? "") < (a.effectiveTo ?? "9999");
+}
+
+/** No moment given means the version in force now. Candidates are newest first. */
+function inForce(candidates, at) {
+  if (!candidates) return undefined;
+  const moment = at ?? new Date().toISOString();
+  return candidates.find((policy) => covers(policy, moment));
+}
+
 function parsePolicy(name, raw, cel, logger) {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new PolicyError(`${name}: top level must be a mapping`);
   const needText = (key) => {
@@ -170,6 +212,9 @@ function parsePolicy(name, raw, cel, logger) {
   for (const c of classes) {
     if (!CLASS_PATTERN.test(c)) throw new PolicyError(`${name}: invalid class pattern ${JSON.stringify(c)} (expected e.g. credit.approve or credit.*)`);
   }
+  const effectiveFrom = asDate(name, raw.effective_from, "effective_from");
+  const effectiveTo = asDate(name, raw.effective_to, "effective_to");
+  if (effectiveFrom && effectiveTo && effectiveTo <= effectiveFrom) throw new PolicyError(`${name}: effective_to must be after effective_from`);
   const failMode = oneOf("fail_mode", "closed", FAIL_MODES);
   const fallback = oneOf("default", "deny", CLAUSE_RESULTS);
 
@@ -211,6 +256,7 @@ function parsePolicy(name, raw, cel, logger) {
   return {
     policyId, version, classes: classes.map((c) => c.trim()), clauses, failMode, default: fallback,
     title: raw.title ? String(raw.title) : undefined, tests, source: name,
+    effectiveFrom, effectiveTo,
     obligations, enforce: raw.enforce === true, retention,
   };
 }
@@ -226,10 +272,21 @@ export class PolicyBundle {
         const wildcard = cls.endsWith(".*");
         const table = wildcard ? this._prefix : this._exact;
         const key = wildcard ? cls.slice(0, -2) : cls;
-        if (table.has(key)) throw new PolicyError(`class ${JSON.stringify(cls)} is claimed by both ${table.get(key).policyId} and ${policy.policyId}`);
-        table.set(key, policy);
+        const versions = table.get(key) ?? [];
+        for (const existing of versions) {
+          if (overlaps(existing, policy)) {
+            throw new PolicyError(
+              `class ${JSON.stringify(cls)} is claimed by both ${existing.policyId} (${windowOf(existing)}) and ${policy.policyId} (${windowOf(policy)}); ` +
+                "give each an effective_from so only one governs at a time",
+            );
+          }
+        }
+        table.set(key, [...versions, policy]);
       }
     }
+    // Newest first, so selection is the first version whose window covers the moment.
+    const newestFirst = (a, b) => ((a.effectiveFrom ?? "") < (b.effectiveFrom ?? "") ? 1 : (a.effectiveFrom ?? "") > (b.effectiveFrom ?? "") ? -1 : 0);
+    for (const table of [this._exact, this._prefix]) for (const versions of table.values()) versions.sort(newestFirst);
   }
 
   /** Load every `*.yaml`, `*.yml` and `*.json` file in a directory, or one file. */
@@ -261,15 +318,26 @@ export class PolicyBundle {
     return bundle;
   }
 
-  /** Exact class match first, then the longest matching `prefix.*` pattern. */
-  policyFor(decisionClass) {
-    if (this._exact.has(decisionClass)) return this._exact.get(decisionClass);
+  /**
+   * The policy governing this class at `at`: exact match first, then the longest `prefix.*`.
+   *
+   * `at` is the decision's own timestamp, not the reader's clock, so a decision is judged by
+   * the version that was in force when it was made.
+   */
+  policyFor(decisionClass, at) {
+    const exact = inForce(this._exact.get(decisionClass), at);
+    if (exact) return exact;
     const parts = decisionClass.split(".");
     for (let i = parts.length - 1; i > 0; i--) {
-      const prefix = parts.slice(0, i).join(".");
-      if (this._prefix.has(prefix)) return this._prefix.get(prefix);
+      const chosen = inForce(this._prefix.get(parts.slice(0, i).join(".")), at);
+      if (chosen) return chosen;
     }
     return undefined;
+  }
+
+  /** Every dated version claiming this class, newest first. For explaining a selection. */
+  versionsFor(decisionClass) {
+    return [...(this._exact.get(decisionClass) ?? [])];
   }
 }
 
@@ -281,9 +349,17 @@ export class CelPolicyEngine {
     this._log = logger;
   }
 
-  evaluate(decisionClass, inputs) {
-    const policy = this.bundle.policyFor(decisionClass);
-    if (!policy) return new Verdict("unchecked", { reason: `no policy governs class ${decisionClass}` });
+  /** Evaluate against the policy in force at `at`, the decision's own timestamp. */
+  evaluate(decisionClass, inputs, at) {
+    const policy = this.bundle.policyFor(decisionClass, at);
+    if (!policy) {
+      const known = this.bundle.versionsFor(decisionClass);
+      if (known.length) {
+        const windows = known.map((p) => `${p.policyId}@${p.version} (${windowOf(p)})`).join("; ");
+        return new Verdict("unchecked", { reason: `no version of the policy for ${decisionClass} was in force at ${at ?? "this moment"}: ${windows}` });
+      }
+      return new Verdict("unchecked", { reason: `no policy governs class ${decisionClass}` });
+    }
     let activation;
     try {
       if (inputs === null || typeof inputs !== "object" || Array.isArray(inputs)) throw new TypeError("inputs must be a mapping");

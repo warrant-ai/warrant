@@ -26,6 +26,7 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple, Union
 
 from warrant.ids import deterministic_ulid
 from warrant.schema import SCHEMA_VERSION, ValidationError, validate
+from warrant.store import resolve_tenant
 
 log = logging.getLogger("warrant.outcomes")
 
@@ -168,7 +169,7 @@ class Coverage:
         }
 
 
-def coverage(store: Any, *, stream: Optional[str] = None) -> Coverage:
+def coverage(store: Any, *, stream: Optional[str] = None, tenant: Optional[str] = None) -> Coverage:
     """How many decisions have an outcome attached, overall and per decision class.
 
     This is the depth metric behind every calibration claim: a reliability curve computed over a
@@ -176,7 +177,7 @@ def coverage(store: Any, *, stream: Optional[str] = None) -> Coverage:
     beside the curve wherever it is shown.
     """
     report = Coverage(stream=stream)
-    for record in store.iter_records(stream):
+    for record in store.iter_records(stream, resolve_tenant(store, stream, tenant)):
         if record.get("record_type") != "decision":
             continue
         cls = record["decision"]["class"]
@@ -314,18 +315,22 @@ def ingest_outcomes(
     store: Any,
     *,
     stream: str,
+    tenant: Optional[str] = None,
     source: Optional[str] = None,
     dry_run: bool = False,
     with_coverage: bool = True,
 ) -> IngestReport:
     """Read outcome files and attach each row to the decision it names.
 
-    ``stream`` scopes subject lookups; rows carrying ``decision_record_id`` are matched directly.
+    ``stream`` and ``tenant`` scope subject lookups; rows carrying ``decision_record_id`` are
+    matched directly, and never to another tenant's decision. A stream held by several tenants
+    needs ``tenant`` stated.
     Rows that match nothing are collected and reported rather than raised: an operator's export
     routinely contains subjects from outside the window, and that is a finding, not a failure.
     """
     if not paths:
         raise ValueError("no outcome files given")
+    tenant = resolve_tenant(store, stream, tenant)
     report = IngestReport(files=len(paths), stream=stream, dry_run=dry_run)
     pending: List[Dict[str, Any]] = []
     for path in paths:
@@ -333,7 +338,7 @@ def ingest_outcomes(
         report.rows += len(rows) + len(invalid)
         report.invalid.extend(invalid)
         for row in rows:
-            decision = _find_decision(store, row, stream)
+            decision = _find_decision(store, row, stream, tenant)
             if decision is None:
                 report.unmatched.append((row.line, row.key))
                 continue
@@ -349,10 +354,7 @@ def ingest_outcomes(
             report.by_label[row.label] = report.by_label.get(row.label, 0) + 1
 
     if not dry_run and pending:
-        before = store.count(stream)
-        store.write(pending)
-        after = store.count(stream)
-        report.written = after - before
+        report.written = store.write(pending)
         report.duplicates = len(pending) - report.written
         log.info(
             "ingested %d outcome record(s) into stream %s, %d already present",
@@ -361,27 +363,29 @@ def ingest_outcomes(
             report.duplicates,
         )
     if with_coverage and not dry_run:
-        report.coverage = coverage(store, stream=stream)
+        report.coverage = coverage(store, stream=stream, tenant=tenant)
     return report
 
 
-def _find_decision(store: Any, row: OutcomeRow, stream: str) -> Optional[Dict[str, Any]]:
+def _find_decision(store: Any, row: OutcomeRow, stream: str, tenant: Optional[str]) -> Optional[Dict[str, Any]]:
     if row.decision_record_id:
         record = store.get(row.decision_record_id)
         if record is None or record.get("record_type") != "decision":
             return None
+        if tenant is not None and record.get("tenant") != tenant:
+            return None
         return record
-    found = store.find_decision(stream, row.subject)
+    found = store.find_decision(stream, row.subject, tenant)
     return store.get(found) if found else None
 
 
-def iter_joined(store: Any, stream: Optional[str] = None) -> Iterator[Dict[str, Any]]:
+def iter_joined(store: Any, stream: Optional[str] = None, tenant: Optional[str] = None) -> Iterator[Dict[str, Any]]:
     """Every decision in the stream with its latest outcome merged in under ``outcome``.
 
     The same join ``warrant set create`` uses, exposed for calibration so the two cannot drift
     on what "the outcome of a decision" means.
     """
-    for record in store.iter_records(stream):
+    for record in store.iter_records(stream, resolve_tenant(store, stream, tenant)):
         if record.get("record_type") != "decision":
             continue
         outcome = store.latest_outcome(record["record_id"])

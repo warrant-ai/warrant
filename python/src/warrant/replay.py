@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Union
 from xml.sax.saxutils import escape
 
-from warrant.client import AgentInfo, Decision, PolicyEngine, ReplaySource, Unreplayable, decode_blob
+from warrant.client import AgentInfo, Decision, PolicyEngine, ReplaySource, Unreplayable, decode_blob, evaluate_at
 from warrant.sets import DecisionSet, SetItem
 
 log = logging.getLogger("warrant.replay")
@@ -135,10 +135,7 @@ class _AsOf:
         self._at = at
 
     def evaluate(self, decision_class: str, inputs: Mapping[str, Any], at: Optional[str] = None) -> Verdict:
-        try:
-            return self._engine.evaluate(decision_class, inputs, at=self._at)
-        except TypeError:
-            return self._engine.evaluate(decision_class, inputs)  # an engine without dates
+        return evaluate_at(self._engine, decision_class, inputs, self._at)
 
 
 class _ReplayClient:

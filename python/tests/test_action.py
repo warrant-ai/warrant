@@ -45,3 +45,9 @@ def test_record_text_cannot_break_out_of_its_cell_and_long_lists_are_capped():
 
 def test_an_empty_set_does_not_divide_by_zero():
     assert "| Cost per decision | 0.00 → 0.00 (-77%) |" in run.summary_markdown(report([], passed=True))
+
+
+def test_a_baseline_with_no_recorded_cost_has_no_percentage_to_show():
+    free = report([row("LN-1")], passed=True)
+    free["totals"].update(cost_before=0.0, cost_after=0.9, cost_change_pct=None)
+    assert "| Cost per decision | 0.00 → 0.90 |" in run.summary_markdown(free)

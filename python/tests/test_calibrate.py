@@ -224,8 +224,11 @@ class _StubStore:
     def __init__(self, records):
         self._records = records
 
-    def iter_records(self, stream=None):
+    def iter_records(self, stream=None, tenant=None):
         return iter(self._records)
+
+    def tenants(self, stream=None):
+        return []
 
     def latest_outcome(self, decision_record_id):
         return {"outcome": {"status": "observed", "label": "stayed_closed"}}

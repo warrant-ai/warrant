@@ -360,3 +360,75 @@ def test_postgres_signs_erases_and_carries_the_lifecycle(tmp_path):
         assert verify_records(list(w.store.iter_records("lending")), keyring=Keyring([key.public]))[0].ok
     finally:
         w.close()
+
+
+# -- tenants sharing a stream name ---------------------------------------------
+
+
+def test_a_stream_two_tenants_share_is_never_read_without_naming_the_tenant(tmp_path):
+    from warrant.store import resolve_tenant
+
+    store = SQLiteStore(tmp_path / "shared.db")
+    assert store.write([_unsealed(1, tenant="bank-a"), _unsealed(2, tenant="bank-b"), _unsealed(3, tenant="bank-a", stream="kyc")]) == 3
+    assert store.write([_unsealed(1, tenant="bank-a"), _unsealed(4, tenant="bank-a")]) == 1
+    assert store.tenants("lending") == ["bank-a", "bank-b"] and store.tenants("kyc") == ["bank-a"]
+    assert store.tenants() == ["bank-a", "bank-b"] and store.tenants("absent") == []
+    assert resolve_tenant(store, "kyc", None) == "bank-a" and resolve_tenant(store, "absent", None) is None
+    assert resolve_tenant(store, "lending", "bank-b") == "bank-b"
+    with pytest.raises(ValueError, match="holds several tenants \\(bank-a, bank-b\\)"):
+        resolve_tenant(store, "lending", None)
+    with pytest.raises(ValueError, match="the store holds several tenants"):
+        resolve_tenant(store, None, None)
+    store.close()
+
+
+def test_export_refuses_a_shared_stream_until_the_tenant_is_named(tmp_path, capsys):
+    from warrant.cli import main
+
+    db = tmp_path / "shared.db"
+    store = SQLiteStore(db)
+    store.write([_unsealed(1, tenant="bank-a"), _unsealed(2, tenant="bank-b")])
+    store.close()
+    assert main(["export", "--store", str(db), "--stream", "lending"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == "" and "pass the tenant" in captured.err
+    assert main(["export", "--store", str(db), "--stream", "lending", "--tenant", "bank-b"]) == 0
+    exported = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [r["tenant"] for r in exported] == ["bank-b"]
+    assert main(["export", "--store", str(db)]) == 0  # the whole store is the operator's own export
+    assert len(capsys.readouterr().out.splitlines()) == 2
+
+
+def test_collector_counts_duplicates_inside_one_batch(collector):
+    client, _ = collector
+    r = _post(client, [_unsealed(1), _unsealed(1), _unsealed(2)])
+    assert r.status_code == 202 and r.json() == {"accepted": 2, "duplicates": 1}
+    assert "warrant_collector_duplicates_total 1" in client.get("/metrics").text
+
+
+def test_collector_keeps_answering_while_a_batch_is_being_written(tmp_path):
+    """A store write runs in the threadpool, so a slow one cannot stall health checks."""
+    import asyncio
+
+    import httpx
+
+    entered, release = threading.Event(), threading.Event()
+
+    class Slow:
+        def write(self, records):
+            entered.set()
+            assert release.wait(5), "the health check never ran while the write was in progress"
+            return len(records)
+
+    app = create_app(Slow(), tokens={TOKEN: "demo-bank"})
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://collector") as client:
+            write = asyncio.create_task(client.post("/v1/records", json={"records": [_unsealed(1)]}, headers={"Authorization": f"Bearer {TOKEN}"}))
+            assert await asyncio.to_thread(entered.wait, 5)
+            health = await asyncio.wait_for(client.get("/healthz"), timeout=2)
+            release.set()
+            return health, await write
+
+    health, written = asyncio.run(scenario())
+    assert health.status_code == 200 and written.json() == {"accepted": 1, "duplicates": 0}

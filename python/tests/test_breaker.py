@@ -176,9 +176,12 @@ def test_counts_are_cached_so_a_breaker_is_not_a_scan_per_decision(tmp_path):
         def __init__(self, inner):
             self.inner, self.scans = inner, 0
 
-        def iter_records(self, stream=None):
+        def iter_records(self, stream=None, tenant=None):
             self.scans += 1
-            return self.inner.iter_records(stream)
+            return self.inner.iter_records(stream, tenant)
+
+        def tenants(self, stream=None):
+            return self.inner.tenants(stream)
 
     inner = _store(tmp_path, [_decision(i, route="auto") for i in range(20)])
     counting = _Counting(inner)

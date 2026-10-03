@@ -102,14 +102,17 @@ class PostgresStore:
 
     # -- Sink ----------------------------------------------------------------
 
-    def write(self, records: Sequence[Dict[str, Any]]) -> None:
-        """Seal and insert a batch in one transaction. Already-stored record_ids are skipped."""
+    def write(self, records: Sequence[Dict[str, Any]]) -> int:
+        """Seal and insert a batch in one transaction. Already-stored record_ids are skipped.
+
+        Returns how many records were written, so a caller can report duplicates exactly.
+        """
         with self._lock:
             try:
                 with self._conn.cursor() as cur:
-                    for record in records:
-                        self._insert(cur, record)
+                    written = sum(self._insert(cur, record) for record in records)
                 self._conn.commit()
+                return written
             except PermanentSinkError:
                 self._conn.rollback()
                 raise
@@ -117,7 +120,7 @@ class PostgresStore:
                 self._conn.rollback()
                 raise psycopg.OperationalError(f"warrant postgres write failed: {exc}") from exc
 
-    def _insert(self, cur, record: Dict[str, Any]) -> None:
+    def _insert(self, cur, record: Dict[str, Any]) -> bool:
         record_id = record.get("record_id")
         if not isinstance(record_id, str):
             raise PermanentSinkError("record has no record_id")
@@ -131,7 +134,7 @@ class PostgresStore:
         cur.execute("SELECT 1 FROM records WHERE record_id = %s", (record_id,))
         if cur.fetchone():
             log.info("warrant postgres store skipping duplicate record %s", record_id)
-            return
+            return False
         stream, tenant = record.get("stream"), record.get("tenant")
         if not isinstance(stream, str) or not stream:
             raise PermanentSinkError(f"record {record_id} has no stream")
@@ -159,6 +162,7 @@ class PostgresStore:
             ),
         )
         cur.execute("UPDATE stream_heads SET stream_seq = %s, hash = %s WHERE tenant = %s AND stream = %s", (stream_seq, sealed["seal"]["hash"], tenant, stream))
+        return True
 
     # -- queries -------------------------------------------------------------
 
@@ -226,6 +230,12 @@ class PostgresStore:
 
     def streams(self) -> List[str]:
         return [r["stream"] for r in self._query("SELECT DISTINCT stream FROM stream_heads ORDER BY stream")]
+
+    def tenants(self, stream: Optional[str] = None) -> List[str]:
+        """Tenants holding a chain, for one stream name or across the store."""
+        if stream is None:
+            return [r["tenant"] for r in self._query("SELECT DISTINCT tenant FROM stream_heads ORDER BY tenant")]
+        return [r["tenant"] for r in self._query("SELECT DISTINCT tenant FROM stream_heads WHERE stream = %s ORDER BY tenant", (stream,))]
 
     def count(self, stream: Optional[str] = None) -> int:
         if stream is None:

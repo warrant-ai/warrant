@@ -27,6 +27,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Union
 
+from warrant.store import resolve_tenant
+
 log = logging.getLogger("warrant.breaker")
 
 METRICS = ("auto_share", "escalation_share")
@@ -191,6 +193,7 @@ class Breaker:
         store: Any,
         *,
         stream: Optional[str] = None,
+        tenant: Optional[str] = None,
         cache_seconds: float = 60.0,
     ) -> None:
         self._rules: Dict[str, List[BreakerRule]] = {}
@@ -198,6 +201,7 @@ class Breaker:
             self._rules.setdefault(rule.decision_class, []).append(rule)
         self._store = store
         self._stream = stream
+        self._tenant = tenant
         self._cache_seconds = cache_seconds
         self._cache: Dict[str, Any] = {}
 
@@ -232,19 +236,19 @@ class Breaker:
         if cached and (now - cached[0]).total_seconds() < self._cache_seconds:
             return cached[1]
         since = (now - rule.window_delta).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
-        window = count_window(self._store, decision_class, since, stream=self._stream)
+        window = count_window(self._store, decision_class, since, stream=self._stream, tenant=self._tenant)
         self._cache[key] = (now, window)
         return window
 
 
-def count_window(store: Any, decision_class: str, since: str, *, stream: Optional[str] = None) -> Window:
+def count_window(store: Any, decision_class: str, since: str, *, stream: Optional[str] = None, tenant: Optional[str] = None) -> Window:
     """Count decisions of one class written since ``since``, by how they were routed.
 
     Routing is read from ``decision.route`` where a record carries it and inferred from the mandate
     otherwise, so a breaker works on records written before routes existed.
     """
     window = Window()
-    for record in store.iter_records(stream):
+    for record in store.iter_records(stream, resolve_tenant(store, stream, tenant)):
         if record.get("record_type") != "decision":
             continue
         decision = record.get("decision") or {}

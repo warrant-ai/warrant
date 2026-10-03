@@ -31,6 +31,7 @@ from typing import Any, Dict, List, Optional, Sequence
 from warrant import __version__
 from warrant.outcomes import Coverage, coverage
 from warrant.schema import SCHEMA_VERSION
+from warrant.store import resolve_tenant
 from warrant.verify import verify_records
 
 log = logging.getLogger("warrant.pack")
@@ -338,6 +339,7 @@ def build_pack(
     directory: Path,
     *,
     stream: Optional[str] = None,
+    tenant: Optional[str] = None,
     policy_dir: Optional[Path] = None,
     questions_dir: Optional[Path] = None,
     correct_when: Optional[str] = None,
@@ -358,7 +360,8 @@ def build_pack(
     directory = Path(directory)
     if directory.exists() and any(directory.iterdir()):
         raise PackError(f"{directory} is not empty; pass a new directory so nothing is overwritten")
-    records = list(store.iter_records(stream))
+    tenant = resolve_tenant(store, stream, tenant)
+    records = list(store.iter_records(stream, tenant))
     if not records:
         raise PackError(
             f"no records in stream {stream!r}: nothing to pack"
@@ -388,7 +391,7 @@ def build_pack(
     manifest.verified = True
     manifest.levels = {r.stream: {"level": r.level, "reason": r.level_reason} for r in reports}
     witnesses = sorted({co.get("witness") for c in checkpoint_bodies for co in c.get("cosignatures") or []} - {None})
-    cover = coverage(store, stream=stream)
+    cover = coverage(store, stream=stream, tenant=tenant)
 
     # Resolved before a single byte is written, for the same reason the chain is verified first:
     # a half-built pack on disk is worse than none, and a cited version the registry cannot produce
@@ -400,7 +403,7 @@ def build_pack(
         from warrant.calibrate import calibrate
 
         calibration = calibrate(
-            store, correct_when=correct_when, stream=stream, answer=answer,
+            store, correct_when=correct_when, stream=stream, tenant=tenant, answer=answer,
             buckets=buckets, by=by, where=where,
         )
 

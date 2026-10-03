@@ -32,6 +32,7 @@ from warrant.schema import ValidationError, validate
 
 try:
     from fastapi import FastAPI, Request, Response
+    from fastapi.concurrency import run_in_threadpool
     from fastapi.responses import JSONResponse, PlainTextResponse
 except ImportError as exc:  # pragma: no cover
     raise ImportError('the collector needs fastapi and uvicorn: pip install "warrantai[collector]"') from exc
@@ -82,7 +83,7 @@ def parse_tokens(spec: Optional[str]) -> Dict[str, str]:
 
 
 def create_app(store, *, tokens: Optional[Dict[str, str]] = None, insecure: bool = False) -> FastAPI:
-    """Build the collector app around any store with ``write(records)`` and ``get(record_id)``."""
+    """Build the collector app around any store whose ``write(records)`` returns how many it wrote."""
     if not tokens and not insecure:
         raise ValueError("no tokens configured; pass tokens or insecure=True for local development")
     if insecure:
@@ -117,21 +118,16 @@ def create_app(store, *, tokens: Optional[Dict[str, str]] = None, insecure: bool
     def metrics_endpoint():
         return PlainTextResponse(metrics.render(), media_type="text/plain; version=0.0.4")
 
-    @app.post("/v1/records")
-    async def ingest(request: Request):
-        tenant: Optional[str] = None
-        if not insecure:
-            auth = request.headers.get("authorization", "")
-            token = auth[7:] if auth.lower().startswith("bearer ") else ""
-            tenant = tokens.get(token)
-            if tenant is None:
-                metrics.bump(auth_failures=1)
-                return JSONResponse({"detail": "missing or invalid bearer token"}, status_code=401)
-        raw = await request.body()
+    def process(tenant: Optional[str], raw: bytes, gzipped: bool) -> JSONResponse:
+        """Everything after the body is read: decoding, validation and the store write.
+
+        Synchronous on purpose and run in the threadpool, because validating and sealing a batch
+        on the event loop would stall every other request, health checks included.
+        """
         if len(raw) > MAX_BYTES:
             metrics.bump(rejected=1)
             return JSONResponse({"detail": f"batch exceeds {MAX_BYTES} bytes"}, status_code=413)
-        if request.headers.get("content-encoding", "").lower() == "gzip":
+        if gzipped:
             try:
                 raw = gzip.decompress(raw)
             except (OSError, EOFError) as exc:
@@ -173,10 +169,8 @@ def create_app(store, *, tokens: Optional[Dict[str, str]] = None, insecure: bool
             status = 403 if any("tenant" in p["error"] for p in problems) else 400
             return JSONResponse({"detail": f"{len(problems)} record(s) rejected", "problems": problems[:20]}, status_code=status)
 
-        ids = [r["record_id"] for r in records]
-        existing = sum(1 for rid in ids if store.get(rid) is not None)
         try:
-            store.write(records)
+            accepted = store.write(records)
         except PermanentSinkError as exc:
             metrics.bump(rejected=1)
             return JSONResponse({"detail": str(exc)}, status_code=400)
@@ -184,9 +178,25 @@ def create_app(store, *, tokens: Optional[Dict[str, str]] = None, insecure: bool
             metrics.bump(store_errors=1)
             log.error("warrant collector store write failed: %s", exc)
             return JSONResponse({"detail": "store unavailable"}, status_code=503)
-        accepted = len(records) - existing
-        metrics.bump(batches=1, accepted=accepted, duplicates=existing)
-        return JSONResponse({"accepted": accepted, "duplicates": existing}, status_code=202)
+        # Counted by the store inside the write's own transaction: a look-up beforehand miscounts
+        # an id repeated within the batch and one a concurrent batch wrote in between.
+        duplicates = len(records) - accepted
+        metrics.bump(batches=1, accepted=accepted, duplicates=duplicates)
+        return JSONResponse({"accepted": accepted, "duplicates": duplicates}, status_code=202)
+
+    @app.post("/v1/records")
+    async def ingest(request: Request):
+        tenant: Optional[str] = None
+        if not insecure:
+            auth = request.headers.get("authorization", "")
+            token = auth[7:] if auth.lower().startswith("bearer ") else ""
+            tenant = tokens.get(token)
+            if tenant is None:
+                metrics.bump(auth_failures=1)
+                return JSONResponse({"detail": "missing or invalid bearer token"}, status_code=401)
+        raw = await request.body()
+        gzipped = request.headers.get("content-encoding", "").lower() == "gzip"
+        return await run_in_threadpool(process, tenant, raw, gzipped)
 
     return app
 

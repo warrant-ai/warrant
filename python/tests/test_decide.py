@@ -268,3 +268,40 @@ def test_records_carrying_answers_still_seal_and_verify(client):
         d.act("approve", route="auto")
     reports = verify_records(_records(client))
     assert all(r.ok for r in reports), [r.errors for r in reports]
+
+
+def test_a_dated_engine_that_raises_type_error_is_not_evaluated_a_second_time(client):
+    """The fallback for engines without ``at`` must not swallow a real TypeError and retry undated."""
+
+    class Dated:
+        calls = 0
+
+        def evaluate(self, decision_class, inputs, at=None):
+            Dated.calls += 1
+            raise TypeError("a bug inside the engine")
+
+    client.policy = Dated()
+    with pytest.raises(TypeError, match="a bug inside the engine"):
+        with client.decide("credit.approve", subject="LN-1") as d:
+            d.check(amount=1)
+    assert Dated.calls == 1
+
+
+def test_engines_with_and_without_a_date_parameter_are_each_called_their_own_way():
+    from warrant.client import evaluate_at
+
+    class Undated:
+        def evaluate(self, decision_class, inputs):
+            return Verdict("allow", reason="undated")
+
+    class Dated:
+        def evaluate(self, decision_class, inputs, at=None):
+            return Verdict("allow", reason=at)
+
+    class Forwarding:
+        def evaluate(self, *args, **kwargs):
+            return Verdict("allow", reason=kwargs["at"])
+
+    assert evaluate_at(Undated(), "c.d", {}, "2026-01-01T00:00:00Z").reason == "undated"
+    assert evaluate_at(Dated(), "c.d", {}, "2026-01-01T00:00:00Z").reason == "2026-01-01T00:00:00Z"
+    assert evaluate_at(Forwarding(), "c.d", {}, "2026-01-01T00:00:00Z").reason == "2026-01-01T00:00:00Z"

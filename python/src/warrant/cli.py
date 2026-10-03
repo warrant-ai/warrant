@@ -110,10 +110,19 @@ def _cmd_export(args: argparse.Namespace) -> int:
         print(error, file=sys.stderr)
         return 1
     try:
+        from warrant.store import resolve_tenant
+
+        # A whole-store export is the operator's own; a named stream belongs to one tenant.
+        tenant = resolve_tenant(store, args.stream, args.tenant) if args.stream else args.tenant
+    except ValueError as exc:
+        store.close()
+        print(str(exc), file=sys.stderr)
+        return 1
+    try:
         out = open(args.output, "w", encoding="utf-8") if args.output else sys.stdout
         try:
             count = 0
-            for record in store.iter_records(args.stream):
+            for record in store.iter_records(args.stream, tenant):
                 out.write(json.dumps(record, ensure_ascii=False) + "\n")
                 count += 1
         finally:
@@ -227,7 +236,7 @@ def _cmd_set_create(args: argparse.Namespace) -> int:
         print(error, file=sys.stderr)
         return 1
     try:
-        decision_set = build_set(store, args.name, stream=args.stream, where=args.where, limit=args.limit, subjects=args.subject or None)
+        decision_set = build_set(store, args.name, stream=args.stream, tenant=args.tenant, where=args.where, limit=args.limit, subjects=args.subject or None)
     except (ImportError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -451,6 +460,7 @@ def _cmd_outcomes_ingest(args: argparse.Namespace) -> int:
             args.files,
             store,
             stream=args.stream,
+            tenant=args.tenant,
             source=args.source,
             dry_run=args.dry_run,
         )
@@ -479,7 +489,10 @@ def _cmd_outcomes_status(args: argparse.Namespace) -> int:
     if store is None:
         return 1
     try:
-        report = coverage(store, stream=args.stream)
+        report = coverage(store, stream=args.stream, tenant=args.tenant)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
     finally:
         store.close()
     if args.json:
@@ -501,12 +514,13 @@ def _cmd_calibrate(args: argparse.Namespace) -> int:
             store,
             correct_when=args.correct_when,
             stream=args.stream,
+            tenant=args.tenant,
             answer=args.answer,
             buckets=args.buckets,
             by=args.by,
             where=args.where,
         )
-    except (CalibrationError, ImportError) as exc:
+    except (CalibrationError, ImportError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
     finally:
@@ -538,6 +552,7 @@ def _cmd_pack(args: argparse.Namespace) -> int:
             store,
             Path(args.output),
             stream=args.stream,
+            tenant=args.tenant,
             policy_dir=Path(args.policy) if args.policy else None,
             questions_dir=Path(args.questions) if args.questions else None,
             correct_when=args.correct_when,
@@ -645,9 +660,12 @@ def _cmd_breaker_check(args: argparse.Namespace) -> int:
         store.close()
         return 1
     try:
-        breaker = Breaker(rules, store, stream=args.stream, cache_seconds=0)
+        breaker = Breaker(rules, store, stream=args.stream, tenant=args.tenant, cache_seconds=0)
         classes = sorted({r.decision_class for r in rules})
         trips = [t for t in (breaker.check(c) for c in classes) if t is not None]
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
     finally:
         store.close()
     if args.json:
@@ -686,6 +704,7 @@ def build_parser() -> argparse.ArgumentParser:
     exp = sub.add_parser("export", help="export sealed records from a local store as JSONL")
     exp.add_argument("--store", required=True, metavar="URL", help="SQLite path or postgresql:// DSN")
     exp.add_argument("--stream", metavar="NAME", help="only this stream")
+    exp.add_argument("--tenant", metavar="NAME", help="the tenant whose chain to read; required when the store holds this stream for several")
     exp.add_argument("-o", "--output", metavar="FILE", help="write here instead of stdout")
     exp.set_defaults(func=_cmd_export)
 
@@ -708,6 +727,7 @@ def build_parser() -> argparse.ArgumentParser:
     sc.add_argument("name")
     sc.add_argument("--store", required=True, metavar="URL", help="SQLite path or postgresql:// DSN")
     sc.add_argument("--from-stream", dest="stream", required=True, metavar="STREAM")
+    sc.add_argument("--tenant", metavar="NAME", help="the tenant whose chain to read; required when the store holds this stream for several")
     sc.add_argument("--where", metavar="CEL", help="filter, e.g. \"outcome.label == 'default'\"")
     sc.add_argument("--limit", type=int)
     sc.add_argument("--subject", action="append", metavar="SUBJECT", help="only these subjects (repeatable)")
@@ -752,6 +772,7 @@ def build_parser() -> argparse.ArgumentParser:
     oi.add_argument("files", nargs="+", metavar="FILE", help="CSV with a label column and subject or decision_record_id")
     oi.add_argument("--store", default=".warrant/records.db", metavar="URL", help="SQLite path or postgresql:// DSN")
     oi.add_argument("--stream", required=True, metavar="NAME", help="scopes subject lookups")
+    oi.add_argument("--tenant", metavar="NAME", help="the tenant whose chain to read; required when the store holds this stream for several")
     oi.add_argument("--source", metavar="NAME", help="where the outcomes came from, when the file does not say")
     oi.add_argument("--dry-run", action="store_true", help="report only, write nothing")
     oi.add_argument("--report", metavar="FILE", help="write a JSON report")
@@ -759,12 +780,14 @@ def build_parser() -> argparse.ArgumentParser:
     ost = oc_sub.add_parser("status", help="outcome-attached share, overall and per decision class")
     ost.add_argument("--store", default=".warrant/records.db", metavar="URL")
     ost.add_argument("--stream", metavar="NAME")
+    ost.add_argument("--tenant", metavar="NAME", help="the tenant whose chain to read; required when the store holds this stream for several")
     ost.add_argument("--json", action="store_true", help="print the report as JSON")
     ost.set_defaults(func=_cmd_outcomes_status)
 
     cal = sub.add_parser("calibrate", help="did stated confidence match what happened? ECE and a reliability curve")
     cal.add_argument("--store", default=".warrant/records.db", metavar="URL")
     cal.add_argument("--stream", metavar="NAME")
+    cal.add_argument("--tenant", metavar="NAME", help="the tenant whose chain to read; required when the store holds this stream for several")
     cal.add_argument("--correct-when", required=True, metavar="CEL",
                      help="which outcomes vindicate a decision, e.g. \"outcome.label == 'performing'\"")
     cal.add_argument("--answer", metavar="NAME", help="which answer carries the confidence; needed when a decision has several")
@@ -779,6 +802,7 @@ def build_parser() -> argparse.ArgumentParser:
     pk = sub.add_parser("pack", help="assemble an evidence pack: the records, the proof they are intact, and what they add up to")
     pk.add_argument("--store", default=".warrant/records.db", metavar="URL")
     pk.add_argument("--stream", metavar="NAME")
+    pk.add_argument("--tenant", metavar="NAME", help="the tenant whose chain to read; required when the store holds this stream for several")
     pk.add_argument("-o", "--output", required=True, metavar="DIR", help="a new or empty directory")
     pk.add_argument("--policy", metavar="DIR", help="include the policy text that applied in this period")
     pk.add_argument("--questions", metavar="DIR", help="include the question sets the decisions were made by answering")
@@ -817,6 +841,7 @@ def build_parser() -> argparse.ArgumentParser:
     bc.add_argument("rules", metavar="FILE", help="breaker rules, YAML or JSON")
     bc.add_argument("--store", default=".warrant/records.db", metavar="URL")
     bc.add_argument("--stream", metavar="NAME")
+    bc.add_argument("--tenant", metavar="NAME", help="the tenant whose chain to read; required when the store holds this stream for several")
     bc.add_argument("--json", action="store_true")
     bc.set_defaults(func=_cmd_breaker_check)
 

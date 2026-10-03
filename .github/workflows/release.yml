@@ -6,23 +6,68 @@ on:
   push:
     tags: ["v*"]
 jobs:
-  pypi:
+  # Nothing is published unless the tag names the version both packages carry and the tagged
+  # commit is on main. Neither publishing job holds an OIDC token until this has passed.
+  verify:
     runs-on: ubuntu-latest
-    environment: pypi
     permissions:
-      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Tag matches both package versions
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          py=$(python3 -c "import tomllib; print(tomllib.load(open('python/pyproject.toml', 'rb'))['project']['version'])")
+          init=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' python/src/warrant/__init__.py)
+          js=$(node -p "require('./js/package.json').version")
+          echo "tag=$tag pyproject=$py __version__=$init package.json=$js"
+          test "$tag" = "$py" && test "$tag" = "$init" && test "$tag" = "$js"
+      - name: Tagged commit is on main
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+  # Tests and the build run without publishing rights; the publishing job only uploads what was built here.
+  python-build:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
       contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install build
+      - run: pip install -e "python[dev]" build twine
+      - run: pytest python
       - run: python -m build --outdir dist python
+      - run: twine check --strict dist/*
+      - name: The built wheel installs and reports the tagged version
+        run: |
+          python -m venv /tmp/wheel
+          /tmp/wheel/bin/pip install dist/*.whl
+          /tmp/wheel/bin/warrant --version | grep -F "warrant ${GITHUB_REF_NAME#v} "
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-dist
+          path: dist/
+          if-no-files-found: error
+  pypi:
+    needs: python-build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-dist
+          path: dist
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
   npm:
+    needs: verify
     runs-on: ubuntu-latest
     environment: npm
     permissions:

@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Union
 
-from warrant.store import SQLiteStore
+from warrant.store import SQLiteStore, resolve_tenant
 
 log = logging.getLogger("warrant.sets")
 
@@ -91,6 +91,7 @@ def build_set(
     name: str,
     *,
     stream: str,
+    tenant: Optional[str] = None,
     where: Optional[str] = None,
     limit: Optional[int] = None,
     subjects: Optional[List[str]] = None,
@@ -103,7 +104,7 @@ def build_set(
     predicate = _compile_where(where) if where else None
     wanted = set(subjects) if subjects else None
     items: List[SetItem] = []
-    for record in store.iter_records(stream):
+    for record in store.iter_records(stream, resolve_tenant(store, stream, tenant)):
         if record.get("record_type") != "decision":
             continue
         if wanted is not None and record["decision"]["subject"] not in wanted:

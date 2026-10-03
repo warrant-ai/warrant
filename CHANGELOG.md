@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **A stream that two tenants share is never read across tenants.** A chain is (tenant, stream), but `warrant export`, `set create`, `outcomes ingest|status`, `calibrate`, `pack` and `breaker check` read by stream name alone, so on a shared store one tenant's decisions could enter another's export, pack or calibration, and an outcome could attach to another tenant's decision. Each now takes `--tenant` (`tenant=` in the library) and refuses a stream held by several tenants until one is named; a store with one tenant behaves as before. A `decision_record_id` belonging to another tenant matches nothing. Stores gain `tenants(stream)`
+- **The JavaScript policy engine applies effective-dated policies.** `effective_from` / `effective_to` were ignored in JS, so two dated versions of a policy could not load and a decision was not judged by the version in force when it was made. JS now selects by the decision's opening time as Python does, refuses overlapping windows at load, and passes that time to `evaluate(decisionClass, inputs, at)`
+- **A policy engine that raises `TypeError` is no longer evaluated twice.** The fallback for engines without an `at` parameter caught any `TypeError`, re-ran the evaluation undated and could return a verdict under the wrong policy version. Whether an engine takes `at` is now read from its signature
+- **The collector** validates and writes batches off its event loop, so a slow store no longer stalls health checks and other requests, and reports duplicates as counted by the store inside the write (`write()` returns the number written) rather than by a look-up beforehand, which miscounted an id repeated within a batch
+- **The replay Action** no longer fails writing its summary when there is no baseline cost to compare with
+- **Release workflow**: publishing now requires the tag to match both package versions and the tagged commit to be on `main`; Python tests and the build run in a job without publishing rights, and the publishing job uploads only that artifact
+
 ## 0.8.0 (2026-09-27)
 
 The warrant engine in JavaScript, so a TypeScript service can record warranted decisions live.

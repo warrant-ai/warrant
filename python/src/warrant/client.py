@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextvars
+import inspect
 import json
 import logging
 import os
@@ -156,6 +157,22 @@ class PolicyEngine(Protocol):
         """Evaluate the mandate for one decision class against the supplied inputs."""
 
 
+def evaluate_at(engine: PolicyEngine, decision_class: str, inputs: Mapping[str, Any], at: Optional[str]) -> Verdict:
+    """Evaluate at the decision's own moment, for engines written before ``at`` existed too.
+
+    Whether an engine takes ``at`` is read from its signature rather than discovered by catching
+    ``TypeError``: a ``TypeError`` raised inside a dated engine would otherwise run the evaluation
+    a second time without the date and return a verdict under the reader's clock.
+    """
+    try:
+        parameters = inspect.signature(engine.evaluate).parameters.values()
+    except (TypeError, ValueError):  # a callable with no introspectable signature
+        return engine.evaluate(decision_class, inputs, at=at)
+    if any(p.name == "at" or p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters):
+        return engine.evaluate(decision_class, inputs, at=at)
+    return engine.evaluate(decision_class, inputs)
+
+
 @dataclass(frozen=True)
 class AgentInfo:
     """Who is acting. ``identity`` is ``(registry, id)`` or ``(registry, id, uri)`` in a registry the
@@ -236,10 +253,7 @@ class Decision:
         else:
             # The decision's own moment, not the reader's clock: an effective-dated policy must
             # judge this decision by the rules in force when it was made.
-            try:
-                self._verdict = engine.evaluate(self.decision_class, inputs, at=self._opened_at)
-            except TypeError:
-                self._verdict = engine.evaluate(self.decision_class, inputs)  # older engine
+            self._verdict = evaluate_at(engine, self.decision_class, inputs, self._opened_at)
         known = {o["id"] for o in self._obligations}
         for ob in self._verdict.obligations:
             if ob["id"] not in known:

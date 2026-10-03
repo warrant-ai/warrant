@@ -154,8 +154,11 @@ def test_a_broken_chain_produces_no_pack_at_all(tmp_path, store):
         def __init__(self, records):
             self._records = records
 
-        def iter_records(self, stream=None):
+        def iter_records(self, stream=None, tenant=None):
             return iter(self._records)
+
+        def tenants(self, stream=None):
+            return []
 
         def latest_outcome(self, decision_record_id):
             return None

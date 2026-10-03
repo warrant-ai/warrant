@@ -8,7 +8,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
-from warrant.client import Verdict, Warrant
+from warrant.client import Verdict, Warrant, evaluate_at
 
 log = logging.getLogger("warrant.adapters")
 
@@ -73,10 +73,7 @@ class ToolDecision:
 def evaluate(client: Warrant, decision_class: str, inputs: Mapping[str, Any], at: Optional[str] = None) -> Verdict:
     if client.policy is None:
         return Verdict("unchecked", reason="no policy engine configured")
-    try:
-        return client.policy.evaluate(decision_class, inputs, at=at)
-    except TypeError:
-        return client.policy.evaluate(decision_class, inputs)
+    return evaluate_at(client.policy, decision_class, inputs, at)
 
 
 def blocked_message(tool_name: str, verdict: Verdict) -> str:

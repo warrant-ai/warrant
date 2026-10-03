@@ -8,7 +8,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 MAX_ROWS = 25
 
@@ -28,7 +28,7 @@ def summary_markdown(report: Dict[str, Any]) -> str:
               f"| Newly escalated | {totals['new_escalate']} |",
               f"| Unreplayable | {totals['unreplayable']} |",
               f"| Errored | {totals['errored']} |",
-              f"| Cost per decision | {_per(totals['cost_before'], totals['replayed'])} → {_per(totals['cost_after'], totals['replayed'])} ({totals['cost_change_pct']:+.0f}%) |"]
+              f"| Cost per decision | {_per(totals['cost_before'], totals['replayed'])} → {_per(totals['cost_after'], totals['replayed'])}{_change(totals['cost_change_pct'])} |"]
     by_outcome = report.get("flips_by_outcome") or {}
     if by_outcome:
         lines.append("| Flips by recorded outcome | " + ", ".join(f"{n} {_cell(label)}" for label, n in by_outcome.items()) + " |")
@@ -46,6 +46,11 @@ def summary_markdown(report: Dict[str, Any]) -> str:
 
 def _per(total: float, count: int) -> str:
     return f"{total / count:.2f}" if count else "0.00"
+
+
+def _change(pct: Optional[float]) -> str:
+    """No percentage when there is no baseline cost to compare with: nothing replayed, or it was free."""
+    return f" ({pct:+.0f}%)" if pct is not None else ""
 
 
 def _cell(value: Any) -> str:

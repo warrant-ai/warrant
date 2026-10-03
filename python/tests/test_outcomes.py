@@ -312,3 +312,61 @@ def test_iter_joined_agrees_with_the_join_warrant_set_uses(tmp_path, store):
         "alert:A-02": "reopened",
         "alert:A-03": None,
     }
+
+
+# --- tenants sharing a stream name ---------------------------------------------
+
+
+@pytest.fixture
+def shared(tmp_path):
+    """Two tenants, the same stream name, the same subjects: what a shared collector store holds."""
+    s = SQLiteStore(tmp_path / "shared.db")
+    theirs = [dict(_decision(i), tenant="other-bank", record_id=f"01K5A3Q7Z2XV8M9N4B6C1D1E{i:02d}") for i in range(2)]
+    s.write([_decision(i) for i in range(2)] + theirs)
+    yield s
+    s.close()
+
+
+def test_a_shared_stream_is_not_ingested_until_the_tenant_is_named(tmp_path, shared):
+    path = _csv(tmp_path, "subject,label\nalert:A-00,reopened\n")
+    with pytest.raises(ValueError, match="holds several tenants"):
+        ingest_outcomes([path], shared, stream="aml")
+    assert shared.count() == 4
+
+
+def test_an_outcome_attaches_to_the_named_tenants_decision_only(tmp_path, shared):
+    path = _csv(tmp_path, "subject,label\nalert:A-00,reopened\n")
+    report = ingest_outcomes([path], shared, stream="aml", tenant="demo-bank")
+    assert report.written == 1 and report.duplicates == 0
+    outcome = [r for r in shared.iter_records("aml") if r["record_type"] == "outcome"]
+    assert [(r["tenant"], r["references"]["decision_record_id"]) for r in outcome] == [("demo-bank", "01K5A3Q7Z2XV8M9N4B6C1D0E00")]
+    assert report.coverage.decisions == 2 and report.coverage.with_outcome == 1
+    assert coverage(shared, stream="aml", tenant="other-bank").with_outcome == 0
+    assert [r["tenant"] for r in iter_joined(shared, "aml", "other-bank")] == ["other-bank", "other-bank"]
+    again = ingest_outcomes([path], shared, stream="aml", tenant="demo-bank")
+    assert again.written == 0 and again.duplicates == 1
+
+
+def test_a_record_id_from_another_tenant_matches_nothing(tmp_path, shared):
+    path = _csv(tmp_path, "decision_record_id,label\n01K5A3Q7Z2XV8M9N4B6C1D1E00,reopened\n")
+    report = ingest_outcomes([path], shared, stream="aml", tenant="demo-bank")
+    assert report.written == 0 and len(report.unmatched) == 1
+
+
+def test_sets_packs_and_breakers_read_one_tenant_of_a_shared_stream(tmp_path, shared):
+    from warrant.breaker import count_window
+    from warrant.pack import build_pack
+    from warrant.sets import build_set
+
+    for read in (
+        lambda **kw: build_set(shared, "s", stream="aml", **kw),
+        lambda **kw: build_pack(shared, tmp_path / "pack", stream="aml", **kw),
+        lambda **kw: count_window(shared, "aml.alert.disposition", "2026-01-01T00:00:00Z", stream="aml", **kw),
+    ):
+        with pytest.raises(ValueError, match="holds several tenants"):
+            read()
+    assert len(build_set(shared, "s", stream="aml", tenant="other-bank").items) == 2
+    assert count_window(shared, "aml.alert.disposition", "2026-01-01T00:00:00Z", stream="aml", tenant="demo-bank").decisions == 2
+    build_pack(shared, tmp_path / "pack", stream="aml", tenant="other-bank")
+    packed = [json.loads(line) for line in (tmp_path / "pack" / "records.jsonl").read_text().splitlines()]
+    assert {r["tenant"] for r in packed} == {"other-bank"} and len(packed) == 2

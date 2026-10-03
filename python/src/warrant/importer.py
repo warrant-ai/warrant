@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple, Union
 
-from warrant.client import PolicyEngine, Verdict
+from warrant.client import PolicyEngine, Verdict, evaluate_at
 from warrant.hashing import content_hash
 from warrant.ids import deterministic_ulid
 from warrant.otel_attrs import classify_attrs, first_attr, to_int
@@ -403,10 +403,7 @@ def _record_for(span: Span, trace: List[Span], rule: DecisionRule, tax: Taxonomy
     if policy is not None and inputs is not None:
         # Imported decisions are historical by definition, so they are judged by the policy that
         # was in force when they were made rather than the one in force today.
-        try:
-            verdict = policy.evaluate(rule.decision_class, inputs, at=occurred_at)
-        except TypeError:
-            verdict = policy.evaluate(rule.decision_class, inputs)
+        verdict = evaluate_at(policy, rule.decision_class, inputs, occurred_at)
     elif policy is not None:
         verdict = Verdict("unchecked", reason="no inputs found on the decision span")
     else:

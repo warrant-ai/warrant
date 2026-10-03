@@ -97,6 +97,23 @@ def open_store(url: Union[str, Path], *, read_only: bool = False, signer: Any = 
     return SQLiteStore(url, read_only=read_only, signer=signer)
 
 
+def resolve_tenant(store: Any, stream: Optional[str], tenant: Optional[str]) -> Optional[str]:
+    """The tenant a stream query is scoped to: the one given, or the only one the store holds.
+
+    A chain is identified by (tenant, stream), and a shared store can hold the same stream name
+    under two tenants. Reading by stream name alone would then put one customer's decisions into
+    another's export, pack, calibration or outcome join, so an ambiguous query is refused rather
+    than answered across tenants.
+    """
+    if tenant is not None:
+        return tenant
+    held = store.tenants(stream)
+    if len(held) > 1:
+        where = f"stream {stream!r}" if stream else "the store"
+        raise ValueError(f"{where} holds several tenants ({', '.join(held)}); pass the tenant so their records are not mixed")
+    return held[0] if held else None
+
+
 def seal_record(record: Dict[str, Any], stream_seq: int, prev_hash: Optional[str], signer: Any) -> Dict[str, Any]:
     """Assign the sequence, chain the hash and, with a signer, add the issuer's signature (ADR 5.1)."""
     sealed = dict(record)
@@ -157,14 +174,17 @@ class SQLiteStore:
 
     # -- Sink ----------------------------------------------------------------
 
-    def write(self, records: Sequence[Dict[str, Any]]) -> None:
-        """Seal and insert a batch in one transaction. Already-stored record_ids are skipped."""
+    def write(self, records: Sequence[Dict[str, Any]]) -> int:
+        """Seal and insert a batch in one transaction. Already-stored record_ids are skipped.
+
+        Returns how many records were written, so a caller can report duplicates exactly.
+        """
         with self._lock:
             try:
                 self._conn.execute("BEGIN IMMEDIATE")
-                for record in records:
-                    self._insert(record)
+                written = sum(self._insert(record) for record in records)
                 self._conn.execute("COMMIT")
+                return written
             except PermanentSinkError:
                 self._conn.execute("ROLLBACK")
                 raise
@@ -172,7 +192,7 @@ class SQLiteStore:
                 self._conn.execute("ROLLBACK")
                 raise sqlite3.OperationalError(f"warrant store write failed: {exc}") from exc
 
-    def _insert(self, record: Dict[str, Any]) -> None:
+    def _insert(self, record: Dict[str, Any]) -> bool:
         record_id = record.get("record_id")
         if not isinstance(record_id, str):
             raise PermanentSinkError("record has no record_id")
@@ -185,7 +205,7 @@ class SQLiteStore:
                 self._conn.execute("INSERT OR IGNORE INTO evidence_blobs (hash, blob) VALUES (?, ?)", (digest, canonical_json(blob)))
         if self._conn.execute("SELECT 1 FROM records WHERE record_id = ?", (record_id,)).fetchone():
             log.info("warrant store skipping duplicate record %s", record_id)
-            return
+            return False
         stream = record.get("stream")
         if not isinstance(stream, str) or not stream:
             raise PermanentSinkError(f"record {record_id} has no stream")
@@ -224,6 +244,7 @@ class SQLiteStore:
             " ON CONFLICT(tenant, stream) DO UPDATE SET stream_seq = excluded.stream_seq, hash = excluded.hash",
             (tenant, stream, stream_seq, sealed["seal"]["hash"]),
         )
+        return True
 
     # -- queries -------------------------------------------------------------
 
@@ -308,6 +329,14 @@ class SQLiteStore:
     def streams(self) -> List[str]:
         with self._lock:
             return [r["stream"] for r in self._conn.execute("SELECT DISTINCT stream FROM stream_heads ORDER BY stream")]
+
+    def tenants(self, stream: Optional[str] = None) -> List[str]:
+        """Tenants holding a chain, for one stream name or across the store."""
+        sql, params = "SELECT DISTINCT tenant FROM stream_heads", ()
+        if stream is not None:
+            sql, params = sql + " WHERE stream = ?", (stream,)
+        with self._lock:
+            return [r["tenant"] for r in self._conn.execute(sql + " ORDER BY tenant", params)]
 
     def count(self, stream: Optional[str] = None) -> int:
         with self._lock:

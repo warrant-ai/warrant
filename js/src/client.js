@@ -171,7 +171,9 @@ export class Decision {
     if (!engine) {
       this._verdict = new Verdict("unchecked", { reason: "no policy engine configured" });
     } else {
-      const verdict = engine.evaluate(this.decisionClass, inputs);
+      // The decision's own moment, not the reader's clock: an effective-dated policy must
+      // judge this decision by the rules in force when it was made.
+      const verdict = engine.evaluate(this.decisionClass, inputs, this._openedAt);
       if (!(verdict instanceof Verdict)) throw new TypeError("policy.evaluate() must return a Verdict");
       this._verdict = verdict;
     }

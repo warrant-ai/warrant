@@ -70,6 +70,8 @@ Both SDKs run the shared cases in `conformance/policy-cases.json`, so a bundle b
 
 Any object with a synchronous `evaluate(decisionClass, inputs)` that returns a `Verdict` also works as `policy`, if your rules live somewhere else.
 
+A policy file may carry `effective_from` and `effective_to` (a date or an RFC 3339 timestamp). Two versions of one policy can then sit in the same bundle, and `check()` applies the one in force when the decision was opened; `evaluate` receives that moment as a third argument. Windows that overlap are refused at load.
+
 ## Local development
 
 There is no local store in JavaScript. Run the collector from the Python package against a SQLite file and point the SDK at it:
