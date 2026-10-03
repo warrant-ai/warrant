@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.9.0 (2026-10-03)
+
+One canonical form across languages, and the fixes from an outside review of the repository: tenant scoping on shared stores, dated policies in JavaScript, and a collector and release path that fail less quietly.
+
 - **Canonical JSON is now RFC 8785 (JCS), so a record sealed in one language verifies in the other.** Python hashed numbers in its own formatting (`4.0`, `1e-07`, `1e+16`) and JavaScript in ECMAScript's (`4`, `1e-7`, `10000000000000000`), so a Python-sealed record carrying a whole-number float or a small or large number, such as a confidence of `1.0` or a cost of `0.00001`, failed verification in the JS SDK. Python now writes the RFC 8785 form, which is what JavaScript already produced; number output was compared against Node on 220,000 doubles. New records carry `seal.canon: "jcs"` (an optional schema field, outside the hashed body, not signed). `conformance/adr-vectors.json` gains `canonical`, `seal_jcs` and `seal_legacy`; the specification defines the form in 5.1. **Migration:**
   - Records sealed before 0.9.0 have no `seal.canon` and still verify in Python under the old rule; a chain may mix both. In JS they verify unless they hold a number the two forms write differently, which is the gap that existed before
   - A verifier older than 0.9.0 rejects a record carrying `seal.canon` at schema validation, so whoever verifies your exports needs 0.9.0

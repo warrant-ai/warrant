@@ -1,6 +1,6 @@
 {
   "name": "warrantai",
-  "version": "0.9.0-dev.0",
+  "version": "0.9.0",
   "description": "Warrant: the decision ledger for AI agents. Record every consequential agent action with its mandate, evidence, cost and outcome, and replay real decisions before you ship a change.",
   "license": "Apache-2.0",
   "type": "module",
