@@ -16,7 +16,7 @@ from types import TracebackType
 from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Sequence, Tuple, Type, Union
 
 from warrant.emit import Emitter, Sink
-from warrant.hashing import SALT_BYTES, content_hash, record_hash, salted_hash
+from warrant.hashing import SALT_BYTES, content_hash, record_hash, salted_hash, seal_matches
 from warrant.ids import ULID_RE, ulid
 from warrant.redaction import Redactor
 from warrant.schema import SCHEMA_VERSION, ValidationError, validate
@@ -412,7 +412,7 @@ class Decision:
         seal = parent.get("seal") if isinstance(parent, Mapping) else None
         if not isinstance(seal, Mapping) or not seal.get("hash"):
             raise CitationError("the parent is not sealed; cite a record exported from its issuer's store")
-        if record_hash(parent, seal.get("prev_hash")) != seal["hash"]:
+        if not seal_matches(parent):
             raise CitationError(f"parent {parent.get('record_id')} does not match its own seal; it was altered")
         issuer = parent.get("tenant")
         key_id = seal.get("key_id")

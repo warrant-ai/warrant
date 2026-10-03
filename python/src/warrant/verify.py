@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
-from warrant.hashing import record_hash
+from warrant.hashing import record_hash, seal_matches
 from warrant.schema import ValidationError, validate
 
 MAX_ERRORS_PER_STREAM = 20
@@ -108,9 +108,13 @@ def _check_chain(report: StreamReport, items: List[Dict[str, Any]], seen_ids: Di
             continue
         if seal.get("prev_hash") != prev_hash:
             _add(report, f"#{seq}: record {rid} prev_hash does not match the previous record's hash")
-        computed = record_hash(record, seal.get("prev_hash"))
-        if seal["hash"] != computed:
-            _add(report, f"#{seq}: record {rid} hash mismatch; the body was altered after sealing")
+        try:
+            computed = record_hash(record, seal.get("prev_hash"))
+        except ValueError as exc:
+            _add(report, f"#{seq}: record {rid} cannot be checked: {exc}")
+        else:
+            if seal["hash"] != computed:
+                _add(report, f"#{seq}: record {rid} hash mismatch; the body was altered after sealing")
         try:
             validate(record)
         except ValidationError as exc:
@@ -233,7 +237,7 @@ def _check_parents(record: Mapping[str, Any], parents_by_id: Dict[str, Dict[str,
         if seal.get("hash") != cited.get("hash"):
             out.append(f"record {rid} cites {pid} with hash {str(cited.get('hash'))[:12]}, but the parent's seal is {str(seal.get('hash'))[:12]}")
             continue
-        if record_hash(parent, seal.get("prev_hash")) != seal.get("hash"):
+        if not seal_matches(parent):
             out.append(f"record {rid} cites {pid}, which was altered after its issuer sealed it")
             continue
         if keyring is not None:

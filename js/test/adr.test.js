@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   CHECKPOINT_CONTEXT, CitationError, Keyring, PublicKey, SEAL_CONTEXT, SigningKey, Warrant,
-  canonicalJson, consistencyProof, contentHash, inclusionProof, keyIdFor, merkleRoot, recordHash,
+  CANON, canonicalJson, consistencyProof, contentHash, inclusionProof, keyIdFor, merkleRoot, recordHash,
   saltedHash, sealMessage, validate, verifyConsistency, verifyInclusion, verifySeal,
 } from "../src/index.js";
 
@@ -191,4 +191,29 @@ test("cite writes a parent link and record evidence, checks the signature, and r
   assert.deepEqual(item.parent, { record_id: parent.record_id, hash: parent.seal.hash, issuer: "partner-data" });
   assert.equal("claims" in record.decision, false, "a parent's claims are never copied");
   await w.close();
+});
+
+// -- canonical form (RFC 8785) -------------------------------------------------------------
+
+test("canonical JSON is RFC 8785 as the shared vectors state it", () => {
+  assert.ok(vectors.canonical.length >= 25);
+  for (const { value, json } of vectors.canonical) assert.equal(canonicalJson(value), json);
+  for (const bad of [NaN, Infinity, -Infinity]) assert.throws(() => canonicalJson({ x: bad }), /no canonical JSON form/);
+  assert.throws(() => contentHash({ x: NaN }), TypeError);
+});
+
+test("a record a Python store sealed under jcs verifies here, floats and all", () => {
+  const { record, canon, hash } = vectors.seal_jcs;
+  assert.equal(CANON, canon);
+  assert.equal(recordHash({ ...record, seal: { canon, prev_hash: null, hash } }, null), hash);
+  // The same values as JavaScript holds them after parsing the JSON a Python store exports.
+  const exported = JSON.parse('{"amount": 0.0, "confidence": 1.0, "risk": 1e-07}');
+  assert.equal(canonicalJson(exported), '{"amount":0,"confidence":1,"risk":1e-7}');
+  assert.throws(() => recordHash({ ...record, seal: { canon: "jcs-2" } }, null), /canonical form "jcs-2", which this version does not know/);
+});
+
+test("a pre-0.9 Python seal over differently formatted numbers is the documented gap", () => {
+  const { body, hash } = vectors.seal_legacy;
+  assert.notEqual(recordHash(JSON.parse(body), null), hash);
+  assert.match(body, /"amount":0\.0/);
 });

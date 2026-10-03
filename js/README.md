@@ -151,7 +151,7 @@ Python only: checkpoints and witnesses, `warrant verify` levels, `warrant trace`
 
 `validate(record)` and `loadSchema()` for the decision record schema v0, `currentDecision()` for integrations, and a small CLI: `warrant --version | schema | validate <file>`.
 
-One cross-language note: content hashes of strings and bytes match the Python SDK exactly. JSON content matches too, except that JavaScript cannot tell `4.0` from `4`; hash a string when another language has to reproduce it.
+Content hashes and seal hashes match the Python SDK exactly: both write canonical JSON as RFC 8785 specifies, so a record sealed by a Python store verifies here and the reverse. The exception is history: a record a Python store sealed before 0.9.0 (no `seal.canon`) that holds a number Python formats differently, such as `4.0` or `1e-07`, can only be re-hashed by the Python verifier.
 
 Node.js 18 or newer. Types are included.
 

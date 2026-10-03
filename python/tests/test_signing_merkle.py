@@ -113,7 +113,7 @@ def test_a_store_without_a_key_writes_what_it_always_wrote(tmp_path):
     store.write([_record(1)])
     record = next(store.iter_records())
     store.close()
-    assert set(record["seal"]) == {"prev_hash", "hash"}
+    assert set(record["seal"]) == {"canon", "prev_hash", "hash"}
 
 
 def test_signature_failures_say_why(tmp_path):
@@ -273,3 +273,133 @@ def test_the_sealed_at_vector_matches():
     v = vectors["seal_sealed_at"]
     assert seal_message(v["hash"], v["sealed_at"]).decode() == v["message"]
     assert key.sign(seal_message(v["hash"], v["sealed_at"])) == v["signature"]
+
+
+# -- canonical form (RFC 8785) ---------------------------------------------------------
+
+
+def _vectors():
+    from pathlib import Path
+
+    return json.loads((Path(__file__).resolve().parents[2] / "conformance" / "adr-vectors.json").read_text())
+
+
+FLOATS = {"cost": {"amount": 0.0, "currency": "INR"}}
+
+
+def _with_floats(i):
+    record = _record(i, **FLOATS)
+    record["decision"]["answers"] = [{"question": "approve", "value": True, "confidence": 1.0}, {"question": "risk", "value": 1e-7}]
+    return record
+
+
+def _sealed_before_0_9(record, sequence, prev_hash):
+    """A record as a Python store sealed it before 0.9.0: no seal.canon, Python's number formatting."""
+    from warrant.hashing import legacy_canonical_json, sha256_hex
+
+    body = dict(record, sequence=sequence)
+    digest = sha256_hex((legacy_canonical_json(body) + "\n" + (prev_hash or "")).encode())
+    return dict(body, seal={"prev_hash": prev_hash, "hash": digest})
+
+
+def test_canonical_json_is_rfc_8785_as_the_shared_vectors_state_it():
+    from warrant.hashing import canonical_json, record_hash, sha256_hex
+
+    vectors = _vectors()
+    assert len(vectors["canonical"]) >= 25
+    for case in vectors["canonical"]:
+        assert canonical_json(case["value"]) == case["json"], case
+    jcs = vectors["seal_jcs"]
+    assert record_hash(dict(jcs["record"], seal={"canon": jcs["canon"]}), None) == jcs["hash"]
+    legacy = vectors["seal_legacy"]
+    assert sha256_hex((legacy["body"] + "\n").encode()) == legacy["hash"]
+    assert record_hash(json.loads(legacy["body"]), None) == legacy["hash"] != jcs["hash"]
+
+
+def test_values_with_no_canonical_form_are_refused():
+    from warrant.hashing import canonical_json
+
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError, match="no canonical JSON form"):
+            canonical_json({"x": bad})
+        with pytest.raises(TypeError, match="JSON-serialisable"):
+            content_hash({"x": bad})
+    with pytest.raises(TypeError, match="not JSON serializable"):
+        canonical_json({"x": object()})
+    assert canonical_json({2: "b", "10": "a", None: 1, True: 2}) == '{"10":"a","2":"b","null":1,"true":2}'
+    assert canonical_json((1, 2**70)) == "[1,1180591620717411303424]"
+
+
+def test_a_new_record_is_sealed_under_jcs_and_hashes_as_javascript_would(tmp_path):
+    from warrant.hashing import canonical_json, sha256_hex
+    from warrant.verify import verify_records
+
+    store = SQLiteStore(tmp_path / "r.db")
+    store.write([_with_floats(1), _with_floats(2)])
+    records = list(store.iter_records())
+    store.close()
+    first = records[0]
+    assert first["seal"]["canon"] == "jcs"
+    body = {k: v for k, v in first.items() if k != "seal"}
+    text = canonical_json(body)
+    assert '"amount":0,' in text and '"confidence":1,' in text and '"value":1e-7}' in text
+    assert first["seal"]["hash"] == sha256_hex((text + "\n").encode())
+    assert all(r.ok for r in verify_records(records))
+
+
+def test_a_chain_begun_before_0_9_keeps_verifying_as_new_records_join_it():
+    from warrant.store import seal_record
+    from warrant.verify import verify_records
+
+    old = _sealed_before_0_9(_with_floats(1), 1, None)
+    new = seal_record(_with_floats(2), 2, old["seal"]["hash"], None)
+    assert "canon" not in old["seal"] and new["seal"]["canon"] == "jcs"
+    assert [r.ok for r in verify_records([old, new])] == [True]
+
+
+def test_relabelling_a_seal_or_naming_an_unknown_form_fails_verification():
+    from warrant.store import seal_record
+    from warrant.verify import verify_records
+
+    sealed = seal_record(_with_floats(1), 1, None, None)
+    stripped = dict(sealed, seal={k: v for k, v in sealed["seal"].items() if k != "canon"})
+    report = verify_records([stripped])[0]
+    assert not report.ok and "hash mismatch" in report.errors[0]
+    relabelled = dict(_sealed_before_0_9(_with_floats(1), 1, None))
+    relabelled["seal"] = dict(relabelled["seal"], canon="jcs")
+    assert not verify_records([relabelled])[0].ok
+    unknown = dict(sealed, seal=dict(sealed["seal"], canon="jcs-2"))
+    report = verify_records([unknown])[0]
+    assert not report.ok and "canonical form 'jcs-2', which this version does not know" in report.errors[0]
+
+
+def test_citing_a_parent_honours_the_form_it_was_sealed_under(tmp_path):
+    from warrant.hashing import seal_matches
+    from warrant.store import seal_record
+
+    old = _sealed_before_0_9(_with_floats(1), 1, None)
+    new = seal_record(_with_floats(2), 1, None, None)
+    assert seal_matches(old) and seal_matches(new)
+    assert not seal_matches(dict(new, timestamp="2026-09-28T10:00:00.000Z"))
+    assert not seal_matches(dict(new, seal=dict(new["seal"], canon="other"))) and not seal_matches(_with_floats(3))
+
+
+def test_the_state_a_model_reads_keeps_its_number_formatting():
+    from warrant.adapters.model import canonical_state
+
+    assert canonical_state({"b": 4.0, "a": 1e-7}) == '{"a":1e-07,"b":4.0}'
+
+
+def test_evidence_check_still_matches_a_json_digest_made_before_0_9(tmp_path, capsys):
+    from warrant.cli import main
+    from warrant.hashing import legacy_canonical_json, sha256_hex
+
+    artefact = tmp_path / "bureau.json"
+    artefact.write_text('{"score": 748.0, "pd": 1e-7}')
+    content = json.loads(artefact.read_text())
+    old = sha256_hex(legacy_canonical_json(content).encode())
+    assert old != content_hash(content)
+    assert main(["evidence", "check", "--file", str(artefact), "--json", "--hash", content_hash(content)]) == 0
+    assert main(["evidence", "check", "--file", str(artefact), "--json", "--hash", old]) == 0
+    assert "encoding used before 0.9.0" in capsys.readouterr().out
+    assert main(["evidence", "check", "--file", str(artefact), "--json", "--hash", "0" * 64]) == 1

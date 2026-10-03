@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from warrant.admissibility import AUTHORISING, assess
-from warrant.hashing import record_hash
+from warrant.hashing import seal_matches
 
 
 @dataclass
@@ -65,7 +65,7 @@ def trace(record_id: str, records: Iterable[Mapping[str, Any]], keyring: Any = N
             state=(record.get("verdict") or {}).get("state"),
         )
         seal = record.get("seal") or {}
-        if not seal.get("hash") or record_hash(record, seal.get("prev_hash")) != seal.get("hash"):
+        if not seal_matches(record):
             step.problems.append("the record does not match its seal: altered after sealing")
         if keyring is not None:
             from warrant.signing import verify_seal

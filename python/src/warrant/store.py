@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Union
 
 from warrant.emit import PermanentSinkError
-from warrant.hashing import canonical_json, record_hash
+from warrant.hashing import CANON, canonical_json, record_hash
 from warrant.schema import ValidationError, validate
 
 log = logging.getLogger("warrant.store")
@@ -118,7 +118,8 @@ def seal_record(record: Dict[str, Any], stream_seq: int, prev_hash: Optional[str
     """Assign the sequence, chain the hash and, with a signer, add the issuer's signature (ADR 5.1)."""
     sealed = dict(record)
     sealed["sequence"] = stream_seq
-    seal: Dict[str, Any] = {"prev_hash": prev_hash, "hash": record_hash(sealed, prev_hash)}
+    sealed["seal"] = {"canon": CANON}  # names the encoding the hash below is computed over
+    seal: Dict[str, Any] = {"canon": CANON, "prev_hash": prev_hash, "hash": record_hash(sealed, prev_hash)}
     if signer is not None:
         from datetime import datetime, timezone
 

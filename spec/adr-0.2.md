@@ -125,7 +125,7 @@ content_hash = SHA-256( salt || content_bytes )    salt = 32 random bytes
 ```
 
 `content_bytes` is the content as hashed unsalted: bytes as is, strings as UTF-8, anything else as
-canonical JSON (keys sorted, no whitespace, non-ASCII kept). The item carries `salted: true`. The
+canonical JSON (section 5.1). The item carries `salted: true`. The
 salt is kept in the issuer's **sidecar**, next to any captured content, and never on the record.
 
 - Signatures and the hash chain never need the artefact, so offline verification is unaffected.
@@ -143,8 +143,24 @@ The issuer's store assigns `sequence`, sets `seal.prev_hash` to the previous rec
 same `(tenant, stream)` chain, and computes
 
 ```
-seal.hash = SHA-256( canonical_json(record without seal) || "\n" || prev_hash_or_empty )
+seal.canon = "jcs"
+seal.hash  = SHA-256( canonical_json(record without seal) || "\n" || prev_hash_or_empty )
 ```
+
+`canonical_json` is RFC 8785, the JSON Canonicalization Scheme: object keys sorted by UTF-16 code
+unit, no whitespace, strings escaped as ECMAScript's `JSON.stringify` escapes them, and numbers
+written as ECMAScript writes them (`4`, not `4.0`; `1e-7`, not `1e-07`). NaN and Infinity have no
+canonical form and MUST be refused. An integer beyond 2^53 is outside the range every implementation
+can represent and SHOULD be carried as a string. `conformance/adr-vectors.json` holds the values an
+implementation must reproduce.
+
+`seal.canon` names the form the hash covers and is the only value defined here. A record without it
+was sealed by Warrant before 0.9.0, over Python's `json.dumps` formatting with sorted keys, which
+differs from RFC 8785 only in how some numbers are written. Verifiers SHOULD still accept such
+records under that rule; an implementation that cannot reproduce it can verify exactly those whose
+numbers the two forms write alike. A verifier MUST reject a `seal.canon` it does not know. The field
+is outside the hashed body and is not signed: it selects how the hash is recomputed, and a record
+re-labelled with the wrong form no longer matches its own hash.
 
 A signing issuer then sets
 

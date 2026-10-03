@@ -25,7 +25,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 
 from warrant.adapters.base import DecisionModel, ModelError, ModelResult
 from warrant.client import Verdict
-from warrant.hashing import canonical_json, content_hash
+from warrant.hashing import content_hash, legacy_canonical_json
 from warrant.ids import deterministic_ulid
 
 log = logging.getLogger("warrant.adapters.model")
@@ -45,10 +45,15 @@ class LedgerUnavailable(RuntimeError):
 
 
 def canonical_state(state: Any) -> str:
-    """Serialise state deterministically, so the digest covers exactly what the model was sent."""
+    """Serialise state deterministically, so the digest covers exactly what the model was sent.
+
+    This text is the model's input, not a hash input another SDK must reproduce, so it keeps the
+    number formatting it has always had: reformatting ``4.0`` as ``4`` would change what a pinned
+    model reads and move its answers.
+    """
     if isinstance(state, str):
         return state
-    return canonical_json(state)
+    return legacy_canonical_json(state)
 
 
 def _temporal_context() -> Optional[Dict[str, Any]]:

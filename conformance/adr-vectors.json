@@ -74,6 +74,173 @@
     "message": "adr/0.2 seal\n774967d36878a4c709f94024dad5fc3ff5b57c3464c4dca0518c177a5a51ce4e",
     "signature": "mWE/P/PZyjFMO5CYW+Z+qSj2owvSGGHFtLegAnIbKDsr1RZGTq2NIQN/qrIkIkTHDDQxKFJ/FdKmH79PbMgFCA=="
   },
+  "canonical": [
+    {
+      "value": 4.0,
+      "json": "4"
+    },
+    {
+      "value": -0.0,
+      "json": "0"
+    },
+    {
+      "value": 1e-07,
+      "json": "1e-7"
+    },
+    {
+      "value": 1e-05,
+      "json": "0.00001"
+    },
+    {
+      "value": 1e+16,
+      "json": "10000000000000000"
+    },
+    {
+      "value": 1e+21,
+      "json": "1e+21"
+    },
+    {
+      "value": 1.2345678901234568e+20,
+      "json": "123456789012345680000"
+    },
+    {
+      "value": 0.1,
+      "json": "0.1"
+    },
+    {
+      "value": 1.5,
+      "json": "1.5"
+    },
+    {
+      "value": -2.5e-09,
+      "json": "-2.5e-9"
+    },
+    {
+      "value": 5e-324,
+      "json": "5e-324"
+    },
+    {
+      "value": 1.7976931348623157e+308,
+      "json": "1.7976931348623157e+308"
+    },
+    {
+      "value": 9007199254740992.0,
+      "json": "9007199254740992"
+    },
+    {
+      "value": 333333333.3333333,
+      "json": "333333333.3333333"
+    },
+    {
+      "value": 1e-06,
+      "json": "0.000001"
+    },
+    {
+      "value": 9.999999999999997e-07,
+      "json": "9.999999999999997e-7"
+    },
+    {
+      "value": 1e+23,
+      "json": "1e+23"
+    },
+    {
+      "value": 9.999999999999997e+22,
+      "json": "9.999999999999997e+22"
+    },
+    {
+      "value": 0.74,
+      "json": "0.74"
+    },
+    {
+      "value": 100,
+      "json": "100"
+    },
+    {
+      "value": true,
+      "json": "true"
+    },
+    {
+      "value": null,
+      "json": "null"
+    },
+    {
+      "value": "€$\u000f\nA'B\"\\\\\"/",
+      "json": "\"€$\\u000f\\nA'B\\\"\\\\\\\\\\\"/\""
+    },
+    {
+      "value": {
+        "b": 1,
+        "a": [
+          1.0,
+          {
+            "d": "x",
+            "c": 0.5
+          }
+        ]
+      },
+      "json": "{\"a\":[1,{\"c\":0.5,\"d\":\"x\"}],\"b\":1}"
+    },
+    {
+      "value": {
+        "€": "Euro Sign",
+        "\r": "Carriage Return",
+        "דּ": "Hebrew Letter Dalet With Dagesh",
+        "1": "One",
+        "😀": "Emoji: Grinning Face",
+        "": "Control",
+        "ö": "Latin Small Letter O With Diaeresis"
+      },
+      "json": "{\"\\r\":\"Carriage Return\",\"1\":\"One\",\"\":\"Control\",\"ö\":\"Latin Small Letter O With Diaeresis\",\"€\":\"Euro Sign\",\"😀\":\"Emoji: Grinning Face\",\"דּ\":\"Hebrew Letter Dalet With Dagesh\"}"
+    }
+  ],
+  "seal_jcs": {
+    "note": "A record whose numbers Python and ECMAScript once wrote differently. Under seal.canon jcs every SDK reproduces this hash.",
+    "record": {
+      "actor": {
+        "name": "credit-agent",
+        "version": "1"
+      },
+      "cost": {
+        "amount": 0,
+        "currency": "INR"
+      },
+      "decision": {
+        "action": "approve",
+        "answers": [
+          {
+            "confidence": 1,
+            "question": "approve",
+            "value": true
+          },
+          {
+            "question": "risk",
+            "value": 1e-07
+          }
+        ],
+        "class": "credit.approve",
+        "status": "acted",
+        "subject": "LN-1"
+      },
+      "mandate": {
+        "result": "allow"
+      },
+      "origin": "live",
+      "record_id": "01K5A3Q7Z2XV8M9N4B6C1D0001",
+      "record_type": "decision",
+      "schema_version": "0",
+      "sequence": 1,
+      "stream": "lending",
+      "tenant": "vector-issuer",
+      "timestamp": "2026-09-27T10:00:00.000Z"
+    },
+    "canon": "jcs",
+    "hash": "ceeedc4102bef301dc49bdad72f673eeaab1a35d9d425613e7840e88b3058490"
+  },
+  "seal_legacy": {
+    "note": "The same record as a Python store sealed it before 0.9.0: no seal.canon, hashed over the body text below. Only the Python verifier reproduces it from the parsed record.",
+    "body": "{\"actor\":{\"name\":\"credit-agent\",\"version\":\"1\"},\"cost\":{\"amount\":0.0,\"currency\":\"INR\"},\"decision\":{\"action\":\"approve\",\"answers\":[{\"confidence\":1.0,\"question\":\"approve\",\"value\":true},{\"question\":\"risk\",\"value\":1e-07}],\"class\":\"credit.approve\",\"status\":\"acted\",\"subject\":\"LN-1\"},\"mandate\":{\"result\":\"allow\"},\"origin\":\"live\",\"record_id\":\"01K5A3Q7Z2XV8M9N4B6C1D0001\",\"record_type\":\"decision\",\"schema_version\":\"0\",\"sequence\":1,\"stream\":\"lending\",\"tenant\":\"vector-issuer\",\"timestamp\":\"2026-09-27T10:00:00.000Z\"}",
+    "hash": "a7ea3c81ebeb7bbb566e93a9ba6c9ee48baa3f25a5d18c187670dde7f92915f2"
+  },
   "seal_sealed_at": {
     "hash": "774967d36878a4c709f94024dad5fc3ff5b57c3464c4dca0518c177a5a51ce4e",
     "sealed_at": "2026-09-27T12:00:00.000Z",

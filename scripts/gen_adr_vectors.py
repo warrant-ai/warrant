@@ -8,7 +8,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from warrant.hashing import canonical_json, content_hash, record_hash, salted_hash
+from warrant.hashing import CANON, canonical_json, content_hash, legacy_canonical_json, record_hash, salted_hash
 from warrant.merkle import consistency_proof, inclusion_proof, root
 from warrant.signing import CHECKPOINT_CONTEXT, SEAL_CONTEXT, SigningKey, seal_message
 
@@ -25,6 +25,19 @@ record = {
     "mandate": {"result": "allow"},
 }
 h = record_hash(record, None)
+# Values Python and ECMAScript wrote differently before RFC 8785 was adopted, with the one form
+# both must now produce. The number rows include the edge cases from RFC 8785 appendix B.
+canonical_values = [
+    4.0, -0.0, 1e-7, 0.00001, 1e16, 1e21, 123456789012345680000.0, 0.1, 1.5, -2.5e-9, 5e-324, 1.7976931348623157e308,
+    9007199254740992.0, 333333333.3333333, 1e-6, 9.999999999999997e-7, 1e23, 9.999999999999997e22, 0.74, 100, True, None,
+    "\u20ac$\u000f\nA'B\"\\\\\"/", {"b": 1, "a": [1.0, {"d": "x", "c": 0.5}]},
+    {"\u20ac": "Euro Sign", "\r": "Carriage Return", "\ufb33": "Hebrew Letter Dalet With Dagesh", "1": "One",
+     "\U0001f600": "Emoji: Grinning Face", "\u0080": "Control", "\u00f6": "Latin Small Letter O With Diaeresis"},
+]
+float_record = dict(record, cost={"amount": 0.0, "currency": "INR"},
+                    decision=dict(record["decision"], answers=[{"question": "approve", "value": True, "confidence": 1.0}, {"question": "risk", "value": 1e-7}]))
+h_jcs = record_hash(dict(float_record, seal={"canon": CANON}), None)
+h_legacy = record_hash(float_record, None)
 entries = [hashlib.sha256(bytes([i])).hexdigest() for i in range(11)]
 leaves = [bytes.fromhex(e) for e in entries]
 
@@ -34,6 +47,11 @@ vectors = {
     "key": {"issuer": key.issuer, "private_key_hex": bytes(range(32)).hex(), "public_key_b64": key.public.to_dict()["public_key"], "key_id": key.key_id},
     "salted": [{"content": c, "salt_hex": salt.hex(), "plain": content_hash(c), "salted": salted_hash(c, salt)} for c in contents],
     "seal": {"record": record, "hash": h, "message": (SEAL_CONTEXT + h.encode()).decode(), "signature": key.sign(SEAL_CONTEXT + h.encode())},
+    "canonical": [{"value": v, "json": canonical_json(v)} for v in canonical_values],
+    "seal_jcs": {"note": "A record whose numbers Python and ECMAScript once wrote differently. Under seal.canon jcs every SDK reproduces this hash.",
+                 "record": json.loads(canonical_json(float_record)), "canon": CANON, "hash": h_jcs},
+    "seal_legacy": {"note": "The same record as a Python store sealed it before 0.9.0: no seal.canon, hashed over the body text below. Only the Python verifier reproduces it from the parsed record.",
+                    "body": legacy_canonical_json(float_record), "hash": h_legacy},
     "seal_sealed_at": {"hash": h, "sealed_at": "2026-09-27T12:00:00.000Z",
                        "message": seal_message(h, "2026-09-27T12:00:00.000Z").decode(),
                        "signature": key.sign(seal_message(h, "2026-09-27T12:00:00.000Z"))},

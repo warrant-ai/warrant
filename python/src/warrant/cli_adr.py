@@ -285,6 +285,14 @@ def cmd_evidence_check(args: argparse.Namespace) -> int:
     if digest == args.hash:
         print(f"MATCH: {args.file} produces {digest}")
         return 0
+    if args.json:
+        # A digest made by a Python SDK before 0.9.0 covers Python's own number formatting.
+        from warrant.hashing import legacy_canonical_json, sha256_hex
+
+        legacy = legacy_canonical_json(content).encode("utf-8")
+        if sha256_hex((bytes.fromhex(args.salt) if args.salt else b"") + legacy) == args.hash:
+            print(f"MATCH: {args.file} produces {args.hash} under the JSON encoding used before 0.9.0")
+            return 0
     print(f"NO MATCH: {args.file} produces {digest}, the record says {args.hash}")
     return 1
 

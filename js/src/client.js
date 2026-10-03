@@ -279,7 +279,16 @@ export class Decision {
     this._assertOpen();
     const seal = parent && typeof parent === "object" ? parent.seal : undefined;
     if (!seal || typeof seal !== "object" || !seal.hash) throw new CitationError("the parent is not sealed; cite a record exported from its issuer's store");
-    if (recordHash(parent, seal.prev_hash) !== seal.hash) throw new CitationError(`parent ${parent.record_id} does not match its own seal; it was altered`);
+    let intact;
+    try {
+      intact = recordHash(parent, seal.prev_hash) === seal.hash;
+    } catch (err) {
+      throw new CitationError(`parent ${parent.record_id} cannot be checked: ${err.message}`, { cause: err });
+    }
+    if (!intact) {
+      const legacy = seal.canon === undefined ? ", or it was sealed before 0.9.0 with numbers only the Python verifier can re-hash" : "";
+      throw new CitationError(`parent ${parent.record_id} does not match its own seal; it was altered${legacy}`);
+    }
     let issuer = parent.tenant;
     if (keyring) {
       const result = verifySeal(parent, keyring);

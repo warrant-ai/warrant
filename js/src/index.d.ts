@@ -277,7 +277,10 @@ export class Emitter {
   stats(): EmitterStats;
 }
 
+/** RFC 8785 canonical JSON; the Python SDK produces the same bytes. NaN and Infinity throw. */
 export function canonicalJson(value: unknown): string;
+/** The canonical form new records are sealed under, written to `seal.canon`. */
+export const CANON: "jcs";
 export function contentHash(content: unknown): string;
 export function ulid(nowMs?: number): string;
 /** ULID derived from `key`, so a repeated event gets the same id; same bytes as the Python SDK. */
@@ -288,7 +291,11 @@ export const SALT_BYTES: 32;
 export function contentBytes(content: unknown): Buffer;
 /** ADR 4: SHA-256(salt || content), hex. `salt` must be 32 bytes. */
 export function saltedHash(content: unknown, salt: Uint8Array): string;
-/** The seal hash: every field but `seal`, canonical JSON, chained to `prevHash`. */
+/**
+ * The seal hash: every field but `seal`, canonical JSON, chained to `prevHash`. A record with no
+ * `seal.canon` was sealed before 0.9.0; if it holds numbers Python formats differently (`4.0`,
+ * `1e-07`) only the Python verifier reproduces its hash. An unknown `seal.canon` throws.
+ */
 export function recordHash(record: DecisionRecord, prevHash: string | null | undefined): string;
 
 export const SEAL_CONTEXT: "adr/0.2 seal\n";

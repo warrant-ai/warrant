@@ -579,6 +579,12 @@
         "hash": {
           "$ref": "#/$defs/sha256"
         },
+        "canon": {
+          "enum": [
+            "jcs"
+          ],
+          "description": "Canonical form the hash was computed over: RFC 8785. Absent on records sealed before Warrant 0.9.0, which used Python's JSON number formatting (ADR 5.1)."
+        },
         "checkpoint": {
           "type": "integer",
           "minimum": 0
