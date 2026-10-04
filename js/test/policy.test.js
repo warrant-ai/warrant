@@ -195,6 +195,8 @@ test("check() passes the decision's opening time to the engine", { skip }, async
   await w.decide("t.run", { subject: "S-1" }, (d) => { d.check({ n: 500 }); });
   await w.flush();
   await w.close();
-  assert.equal(seen[0], sink.records[0].timestamp);
+  // The opening time, not the record's: the record is stamped when the scope closes, which can be a millisecond later.
+  assert.match(seen[0], /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+  assert.ok(seen[0] <= sink.records[0].timestamp);
   assert.equal(sink.records[0].mandate.policy_version, "2026.2");
 });
