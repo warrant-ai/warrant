@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **`evidence(..., offer=False)` / `{ offer: false }` records an item as an input only.** An item given no obligation is matched to one by the obligation's `name`, or by type when one obligation requires that type, so a document that was on file but not relied on, such as a lapsed certificate, could be counted towards an obligation the caller never offered it for. An item recorded with `offer=False` is never matched; it stays on the record with no `obligation` and no admission. Passing both `obligation` and `offer=False` is refused
+- **The two SDKs are tested against each other on random records in CI.** `scripts/differential.py` generates values and records from a seed (any finite double, escapes and control characters, keys that sort differently by UTF-16 code unit and by code point), seals and signs them in Python for JavaScript to reproduce, then seals the same bodies in JavaScript for Python to verify. CI runs 20,000 on a fresh seed each time and prints the seed on a failure
+
 ## 0.9.0 (2026-10-03)
 
 One canonical form across languages, and the fixes from an outside review of the repository: tenant scoping on shared stores, dated policies in JavaScript, and a collector and release path that fail less quietly.

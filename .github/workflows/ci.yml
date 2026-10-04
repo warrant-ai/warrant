@@ -36,6 +36,19 @@ jobs:
       - run: pip install -e "python[dev]"
       - run: pytest python
       - run: python -m build --outdir dist python
+  differential:
+    # Random records sealed in one SDK and verified in the other, on a fresh seed each run.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: pip install -e "python[sign]"
+      - run: python scripts/differential.py --count 20000
   action:
     # Runs the replay action the way a user's workflow would, against the lending gallery.
     runs-on: ubuntu-latest

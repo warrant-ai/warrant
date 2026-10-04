@@ -190,3 +190,35 @@ test("a reviewer whose approval is the decision meets the human obligation", asy
   validate(record);
   await w.close();
 });
+
+test("an item withheld from offer is never matched to an obligation", async () => {
+  const sink = { records: [], write(batch) { this.records.push(...batch); } };
+  const w = new Warrant("frw", { tenant: "t", store: sink, agent: { name: "engine", version: "1" }, spillDir: await mkdtemp(join(tmpdir(), "of-")), logger: quiet });
+  const decide = async (subject, offer) => {
+    let state;
+    await w.decide("frw.withholding.determination", { subject }, (d) => {
+      d.obligation("OB-TRC", { requires: "document", providers: ["foreign-tax-authority"], name: "trc" });
+      d.obligation("OB-INV", { requires: "tool_call", providers: ["erp"] });
+      d.evidence("trc", { uri: "frw://case/1/trc", type: "document", provider: "foreign-tax-authority", content: "trc", ...offer });
+      d.evidence("invoice", { uri: "frw://case/1/invoice", type: "tool_call", provider: "erp", content: "inv", ...offer });
+      state = d.warrant();
+    });
+    return state;
+  };
+  const matched = await decide("FRW-1", {});
+  assert.equal(matched.state, "warranted"); // by name, and by type
+  assert.deepEqual([...matched.met].sort(), ["OB-INV", "OB-TRC"]);
+  const withheld = await decide("FRW-2", { offer: false });
+  assert.equal(withheld.state, "pending_evidence");
+  assert.deepEqual([...withheld.unmet].sort(), ["OB-INV", "OB-TRC"]);
+  await w.decide("frw.withholding.determination", { subject: "FRW-3" }, (d) => {
+    assert.throws(() => d.evidence("trc", { uri: "frw://case/1/trc", type: "document", content: "trc", obligation: "OB-TRC", offer: false }), /withheld from offer/);
+  });
+  await w.flush();
+  const { _blobs, ...record } = sink.records.find((r) => r.decision.subject === "FRW-2");
+  assert.equal(record.evidence.length, 2); // still on the record, as inputs
+  assert.ok(record.evidence.every((e) => !("obligation" in e) && !("admission" in e)));
+  assert.ok(record.obligations.every((o) => o.met === false));
+  validate(record);
+  await w.close();
+});

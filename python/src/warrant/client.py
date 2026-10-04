@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Sequence, Tuple, Type, Union
+from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Sequence, Set, Tuple, Type, Union
 
 from warrant.emit import Emitter, Sink
 from warrant.hashing import SALT_BYTES, content_hash, record_hash, salted_hash, seal_matches
@@ -222,6 +222,7 @@ class Decision:
         self._cost_centre: Optional[str] = None
         self._verdict: Optional[Verdict] = None
         self._evidence: List[Dict[str, Any]] = []
+        self._not_offered: Set[int] = set()
         self._cost_items: List[Dict[str, Any]] = []
         self._human: Dict[str, Any] = {"required": False}
         self._inputs: Optional[Dict[str, Any]] = None
@@ -318,11 +319,14 @@ class Decision:
         provider: Optional[str] = None,
         obligation: Optional[str] = None,
         sensitive: bool = False,
+        offer: bool = True,
     ) -> str:
         """Attach evidence by reference. Content is hashed here and never stored. Returns the hash.
 
         ``provider`` names who produced it; the acting agent's own evidence is never admitted for its
-        own obligation. ``obligation`` is the obligation id it is offered against. ``sensitive``
+        own obligation. ``obligation`` is the obligation id it is offered against. ``offer=False``
+        records the item as an input only: it is never matched to an obligation by name or type,
+        for a document that is on file but was not relied on. ``sensitive``
         uses a salted digest (ADR 4): the salt goes to the store's sidecar, never onto the record,
         so erasing the sidecar entry unlinks the digest from the data while the record still verifies.
         """
@@ -341,6 +345,8 @@ class Decision:
             raise ValueError("provider must be a non-empty string")
         if obligation is not None and (not isinstance(obligation, str) or not obligation):
             raise ValueError("obligation must be a non-empty string")
+        if not offer and obligation is not None:
+            raise ValueError("evidence cannot be offered against an obligation and withheld from offer at once")
         if sensitive:
             if content is None:
                 raise ValueError("sensitive evidence needs its content: a salted digest cannot be made from a bare hash")
@@ -369,6 +375,8 @@ class Decision:
             if not isinstance(excerpt, str):
                 raise TypeError("excerpt must be a string")
             item["excerpt"] = excerpt
+        if not offer:
+            self._not_offered.add(len(self._evidence))
         self._evidence.append(item)
         return digest
 
@@ -538,8 +546,8 @@ class Decision:
         requires that type. The assignment is written onto the record, so the verifier judges the
         same pairing the issuer did.
         """
-        for item in self._evidence:
-            if "obligation" in item or item.get("type") == "model_call":
+        for index, item in enumerate(self._evidence):
+            if "obligation" in item or item.get("type") == "model_call" or index in self._not_offered:
                 continue
             by_name = [o for o in self._obligations if o.get("name") and o["name"] == item["name"]]
             by_type = [o for o in self._obligations if not o.get("name") and o["requires"] == item["type"]]

@@ -573,3 +573,29 @@ def test_a_reviewer_whose_approval_is_the_decision_meets_the_human_obligation(tm
     w.close()
     assert record["human"]["reviewer"] == "asha@example.test" and record["human"]["shown"] == [seen]
     assert record["verdict"]["state"] == "warranted"
+
+
+def test_an_item_withheld_from_offer_is_never_matched_to_an_obligation(tmp_path):
+    w = Warrant("s", tenant="t", store=tmp_path / "r.db", agent=AgentInfo("engine", "1"), flush_interval=0.02)
+
+    def decide(subject, **offer):
+        with w.decide("frw.withholding.determination", subject=subject) as d:
+            d.obligation("OB-TRC", requires="document", providers=["foreign-tax-authority"], name="trc")
+            d.obligation("OB-INV", requires="tool_call", providers=["erp"])
+            d.evidence("trc", uri="frw://case/1/trc", type="document", provider="foreign-tax-authority", content="trc", **offer)
+            d.evidence("invoice", uri="frw://case/1/invoice", type="tool_call", provider="erp", content="inv", **offer)
+            return d.warrant()
+
+    matched = decide("FRW-1")
+    assert matched.state == "warranted" and set(matched.met) == {"OB-TRC", "OB-INV"}, "by name, and by type"
+    withheld = decide("FRW-2", offer=False)
+    assert withheld.state == "pending_evidence" and set(withheld.unmet) == {"OB-TRC", "OB-INV"}
+    with w.decide("frw.withholding.determination", subject="FRW-3") as d:
+        with pytest.raises(ValueError, match="withheld from offer"):
+            d.evidence("trc", uri="frw://case/1/trc", type="document", content="trc", obligation="OB-TRC", offer=False)
+    w.flush()
+    record = [r for r in w.store.iter_records() if r["decision"]["subject"] == "FRW-2"][0]
+    w.close()
+    assert len(record["evidence"]) == 2, "still on the record, as inputs"
+    assert all("obligation" not in e and "admission" not in e for e in record["evidence"])
+    assert all(o["met"] is False for o in record["obligations"])

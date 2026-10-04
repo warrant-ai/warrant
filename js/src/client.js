@@ -148,6 +148,7 @@ export class Decision {
     this._costCentre = undefined;
     this._verdict = null;
     this._evidence = [];
+    this._notOffered = new Set();
     this._costItems = [];
     this._human = { required: false };
     this._inputs = undefined;
@@ -213,10 +214,12 @@ export class Decision {
    * Attach evidence by reference. Content is hashed here and never stored. Returns the hash.
    *
    * `provider` names who produced it; `obligation` is the obligation id it is offered against.
+   * `offer: false` records the item as an input only: it is never matched to an obligation by
+   * name or type, for a document that is on file but was not relied on.
    * `sensitive` uses a salted digest (ADR 4): the salt rides to the collector's sidecar, never
    * onto the record, so erasing the sidecar entry unlinks the digest while the record still verifies.
    */
-  evidence(name, { uri, type = "other", content, contentHash: given, excerpt, retrievedAt, provider, obligation, sensitive = false } = {}) {
+  evidence(name, { uri, type = "other", content, contentHash: given, excerpt, retrievedAt, provider, obligation, sensitive = false, offer = true } = {}) {
     this._assertOpen();
     requireText(name, "evidence name");
     requireText(uri, "evidence uri");
@@ -225,6 +228,7 @@ export class Decision {
     if (given !== undefined && !SHA256_RE.test(given)) throw new TypeError("contentHash must be 64 lowercase hex characters (sha256)");
     if (provider !== undefined) requireText(provider, "provider");
     if (obligation !== undefined) requireText(obligation, "obligation");
+    if (!offer && obligation !== undefined) throw new TypeError("evidence cannot be offered against an obligation and withheld from offer at once");
     let digest;
     if (sensitive) {
       if (content === undefined) throw new TypeError("sensitive evidence needs its content: a salted digest cannot be made from a bare hash");
@@ -244,6 +248,7 @@ export class Decision {
       if (typeof excerpt !== "string") throw new TypeError("excerpt must be a string");
       item.excerpt = excerpt;
     }
+    if (!offer) this._notOffered.add(item);
     this._evidence.push(item);
     return digest;
   }
@@ -386,7 +391,7 @@ export class Decision {
    */
   _autoOffer() {
     for (const item of this._evidence) {
-      if ("obligation" in item || item.type === "model_call") continue;
+      if ("obligation" in item || item.type === "model_call" || this._notOffered.has(item)) continue;
       const byName = this._obligations.filter((o) => o.name && o.name === item.name);
       const byType = this._obligations.filter((o) => !o.name && o.requires === item.type);
       const match = byName.length ? byName : byType;

@@ -101,6 +101,8 @@ export interface EvidenceOptions {
   provider?: string;
   /** The obligation id this item is offered against. */
   obligation?: string;
+  /** `false` records the item as an input only; it is never matched to an obligation by name or type. */
+  offer?: boolean;
   /** Salted digest (ADR 4). Needs `content`; refuses `excerpt` and a bare `contentHash`. */
   sensitive?: boolean;
 }
