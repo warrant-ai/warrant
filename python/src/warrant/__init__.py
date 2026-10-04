@@ -27,7 +27,7 @@ from warrant.schema import SCHEMA_VERSION, ValidationError, load_schema, validat
 from warrant.store import SQLiteStore
 from warrant.verify import StreamReport, verify_records
 
-__version__ = "0.10.0.dev0"
+__version__ = "0.10.0"
 
 __all__ = [
     "AgentInfo",
