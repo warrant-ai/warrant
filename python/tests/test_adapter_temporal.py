@@ -232,3 +232,72 @@ def test_a_denial_is_not_an_escalation():
     denied = ApplicationError("no", {"record_id": "X", "result": "deny"}, type="WarrantDenied", non_retryable=True)
     assert blocked(denied) == {"record_id": "X", "result": "deny"} and escalation(denied) is None
     assert blocked(RuntimeError("other")) is None
+
+
+def _run_with_plugin(plugin, loan, *, replay=True, interceptors=()):
+    """Run the plain-import workflow with the plugin on the worker, then replay its history with the same plugin."""
+    from temporalio.testing import WorkflowEnvironment
+    from temporalio.worker import Replayer, Worker
+
+    from temporal_app_plugin import Loan, PluginLoanWorkflow, underwrite
+
+    async def go():
+        async with await WorkflowEnvironment.start_time_skipping() as env:
+            async with Worker(env.client, task_queue="lending-plugin", workflows=[PluginLoanWorkflow], activities=[underwrite], plugins=[plugin], interceptors=list(interceptors)):
+                handle = await env.client.start_workflow(PluginLoanWorkflow.run, Loan(**loan), id=f"loan-{uuid.uuid4()}", task_queue="lending-plugin")
+                out = await handle.result()
+                history = await handle.fetch_history()
+            if replay:
+                await Replayer(workflows=[PluginLoanWorkflow], plugins=[plugin]).replay_workflow(history)
+            return out
+
+    return asyncio.run(go())
+
+
+def test_plugin_installs_the_interceptor_the_record_activity_and_the_sandbox_passthrough(ledger):
+    from warrant.adapters.temporal import WarrantPlugin
+
+    w, records = ledger
+    guard = WarrantInterceptor(w, {"disburse": DISBURSE})
+    plugin = WarrantPlugin(guard)
+    assert plugin.name() == "warrant.WarrantPlugin"
+    out = _run_with_plugin(plugin, GOOD)
+    verdict = out["verdict"]
+    assert (verdict["result"], verdict["clause"], verdict["status"]) == ("allow", "4.2", "acted")
+    # The worker registered nothing but `underwrite`; the plugin supplied the record activity and the passthrough.
+    # The replay afterwards wrote nothing: one record, and it is the one the workflow saw.
+    (decision,) = records()
+    assert decision["record_id"] == verdict["record_id"] and decision["decision"]["summary"] == "decided in the workflow"
+    assert all(r.ok for r in verify_records([decision]))
+
+
+def test_plugin_does_not_double_a_guard_also_given_as_an_interceptor(ledger):
+    from warrant.adapters.temporal import WarrantPlugin
+
+    w, records = ledger
+    guard = WarrantInterceptor(w, {"disburse": DISBURSE})
+    out = _run_with_plugin(WarrantPlugin(guard), GOOD, interceptors=[guard])
+    assert out["verdict"]["status"] == "acted"
+    (decision,) = records()
+    assert decision["record_id"] == out["verdict"]["record_id"]
+
+
+def test_plugin_rejects_anything_but_a_warrant_interceptor():
+    from warrant.adapters.temporal import WarrantPlugin
+
+    with pytest.raises(TypeError, match="WarrantInterceptor"):
+        WarrantPlugin(object())
+
+
+def test_plugin_passes_warrant_through_the_sandbox_and_leaves_other_runners_alone():
+    from temporalio.worker import UnsandboxedWorkflowRunner
+    from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner, SandboxRestrictions
+
+    from warrant.adapters.temporal import _passthrough_warrant
+
+    assert "warrant" in _passthrough_warrant(None).restrictions.passthrough_modules
+    theirs = SandboxedWorkflowRunner(restrictions=SandboxRestrictions.default.with_passthrough_modules("their_lib"))
+    merged = _passthrough_warrant(theirs)
+    assert {"warrant", "their_lib"} <= merged.restrictions.passthrough_modules and merged.runner_class is theirs.runner_class
+    unsandboxed = UnsandboxedWorkflowRunner()
+    assert _passthrough_warrant(unsandboxed) is unsandboxed

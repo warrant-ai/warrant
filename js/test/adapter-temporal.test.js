@@ -60,14 +60,15 @@ function activities(modelUsage, Context) {
   };
 }
 
-async function run(guard, loan, mode) {
+async function run(guard, loan, mode, { plugins } = {}) {
   const { TestWorkflowEnvironment, Worker, activity, adapter } = await load();
   const env = await TestWorkflowEnvironment.createTimeSkipping();
   try {
     const worker = await Worker.create({
       connection: env.nativeConnection, taskQueue: "lending-agents",
       workflowsPath: fileURLToPath(new URL("./temporal-workflows.js", import.meta.url)),
-      activities: activities(adapter.modelUsage, activity.Context), interceptors: { activity: [guard] },
+      activities: activities(adapter.modelUsage, activity.Context),
+      ...(plugins ? { plugins } : { interceptors: { activity: [guard] } }),
     });
     return await worker.runUntil(env.client.workflow.execute("loanWorkflow", { args: [loan, mode], taskQueue: "lending-agents", workflowId: `loan-${Date.now()}-${Math.random()}` }));
   } finally {
@@ -159,4 +160,33 @@ test("the mapping reads the single object argument or a function of any call sha
   assert.throws(() => new adapter.ActivityDecision({ decisionClass: "credit.approve" }), /subject must be/);
   assert.throws(() => adapter.warrantActivityInterceptor({}, {}), /must be a Warrant/);
   assert.throws(() => adapter.modelUsage("anthropic", "claude-sonnet-5"), /activity/i);
+});
+
+test("the plugin installs the interceptor on a worker given no interceptors", { skip }, async () => {
+  const { adapter } = await load();
+  const { w, records } = await ledger();
+  const plugin = adapter.warrantPlugin(w, { disburse: DISBURSE(adapter) });
+  assert.equal(plugin.name, "warrantai.WarrantPlugin");
+  const out = await run(null, GOOD, "object", { plugins: [plugin] });
+  assert.deepEqual(out, { result: "disbursed LN-1" });
+  const [decision] = await records();
+  validate(decision);
+  assert.deepEqual(decision.decision, { class: "credit.approve", action: "disburse", subject: "LN-1", status: "acted" });
+  assert.equal(decision.mandate.clause, "4.2");
+  await w.close();
+});
+
+test("the plugin keeps interceptors the worker already has and never adds its own twice", async () => {
+  const { adapter } = await load();
+  const { w } = await ledger();
+  const plugin = adapter.warrantPlugin(w, { disburse: DISBURSE(adapter) });
+  const other = () => ({});
+  const once = plugin.configureWorker({ taskQueue: "q", interceptors: { activity: [other], workflowModules: ["x"] } });
+  assert.equal(once.taskQueue, "q");
+  assert.deepEqual(once.interceptors.workflowModules, ["x"]);
+  assert.equal(once.interceptors.activity.length, 2);
+  assert.equal(once.interceptors.activity[0], other);
+  const twice = plugin.configureWorker(once);
+  assert.equal(twice.interceptors.activity.length, 2);
+  await w.close();
 });

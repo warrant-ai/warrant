@@ -2,11 +2,16 @@
 
     from temporalio.worker import Worker
     from warrant.adapters import ToolDecision
-    from warrant.adapters.temporal import WarrantInterceptor
+    from warrant.adapters.temporal import WarrantInterceptor, WarrantPlugin
 
     guard = WarrantInterceptor(w, {"disburse": ToolDecision("credit.disburse", subject="loan_id",
                                                             inputs=["amount", "bureau_score", "foir"])})
-    worker = Worker(client, task_queue=..., workflows=[...], activities=[...], interceptors=[guard])
+    worker = Worker(client, task_queue=..., workflows=[...], activities=[...], plugins=[WarrantPlugin(guard)])
+
+The plugin installs the interceptor, registers the ``warrant.record`` local activity, and lets
+workflow code import ``warrant`` without ``workflow.unsafe.imports_passed_through()``. Give the
+same plugin to ``Replayer(plugins=[...])``. Without a plugin, pass ``interceptors=[guard]`` and
+register ``guard.record_activity`` yourself.
 
 Workflow code does not change. Before a mapped activity runs, its arguments are checked
 against the policy. ``deny`` and ``escalate`` stop it: the attempt is recorded as withheld and
@@ -23,8 +28,7 @@ The policy check is in-process and recording is asynchronous: a Warrant outage n
 touches an activity. Requires ``pip install "warrantai[temporal]"``.
 
 Workflow code can also make decisions of its own and hand approvals back to escalated
-activities; see ``warrant.adapters.temporal_workflow``. For that, register
-``guard.record_activity`` in the worker's ``activities`` too.
+activities; see ``warrant.adapters.temporal_workflow``.
 """
 
 from __future__ import annotations
@@ -43,7 +47,9 @@ from warrant.ids import ULID_RE, deterministic_ulid
 try:
     from temporalio import activity
     from temporalio.exceptions import ApplicationError
+    from temporalio.plugin import SimplePlugin
     from temporalio.worker import ActivityInboundInterceptor, ExecuteActivityInput, Interceptor, WorkflowInboundInterceptor, WorkflowInterceptorClassInput
+    from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner, SandboxRestrictions
 except ImportError as exc:  # pragma: no cover
     raise ImportError('the Temporal adapter needs temporalio: pip install "warrantai[temporal]"') from exc
 
@@ -235,6 +241,62 @@ class WarrantInterceptor(Interceptor):
         record_id = self._client.human_verdict(reviewer=request["reviewer"], verdict=request["verdict"], decision_record_id=request["decision_record_id"],
                                                note=request.get("note"), record_id=request["record_id"])
         return {"record_id": record_id, "verdict": request["verdict"]}
+
+
+class WarrantPlugin(SimplePlugin):
+    """One line on the worker: ``Worker(..., plugins=[WarrantPlugin(guard)])``.
+
+    Installs the interceptor, registers the ``warrant.record`` local activity, and adds ``warrant``
+    to the workflow sandbox's passthrough modules, so workflow code imports
+    ``warrant.adapters.temporal_workflow`` like any other module. A runner that is not the
+    sandbox is left as it is. Give the same plugin to ``Replayer(plugins=[...])`` so a replay sees
+    the interceptor and the sandbox the worker had. Appears in logs as ``warrant.WarrantPlugin``.
+    """
+
+    def __init__(self, interceptor: WarrantInterceptor) -> None:
+        if not isinstance(interceptor, WarrantInterceptor):
+            raise TypeError("WarrantPlugin takes a WarrantInterceptor")
+        self.interceptor = interceptor
+        super().__init__(
+            "warrant.WarrantPlugin",
+            interceptors=[interceptor],
+            activities=self._add_record_activity,
+            workflow_runner=_passthrough_warrant,
+        )
+
+    def _add_record_activity(self, existing: Optional[Sequence[Callable[..., Any]]]) -> Sequence[Callable[..., Any]]:
+        activities = list(existing or [])
+        if self.interceptor.record_activity not in activities:
+            activities.append(self.interceptor.record_activity)
+        return activities
+
+    def configure_worker(self, config: Any) -> Any:
+        config = super().configure_worker(config)
+        config["interceptors"] = _once(config.get("interceptors"))
+        return config
+
+    def configure_replayer(self, config: Any) -> Any:
+        config = super().configure_replayer(config)
+        config["interceptors"] = _once(config.get("interceptors"))
+        return config
+
+
+def _passthrough_warrant(runner: Any) -> Any:
+    """The worker's sandbox with ``warrant`` passed through; any other runner unchanged."""
+    if runner is None:
+        return SandboxedWorkflowRunner(restrictions=SandboxRestrictions.default.with_passthrough_modules("warrant"))
+    if isinstance(runner, SandboxedWorkflowRunner):
+        return SandboxedWorkflowRunner(restrictions=runner.restrictions.with_passthrough_modules("warrant"), runner_class=runner.runner_class)
+    return runner
+
+
+def _once(interceptors: Optional[Sequence[Any]]) -> List[Any]:
+    """Each interceptor once, in order: a guard given both directly and through the plugin would record every decision twice."""
+    seen: List[Any] = []
+    for item in interceptors or []:
+        if not any(item is kept for kept in seen):
+            seen.append(item)
+    return seen
 
 
 class _Inbound(ActivityInboundInterceptor):

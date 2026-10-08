@@ -48,5 +48,14 @@ export type ActivityInterceptorFactory = (ctx: unknown) => {
 /** Build the factory for `Worker.create({ interceptors: { activity: [factory] } })`. */
 export function warrantActivityInterceptor(client: Warrant, decisions: Record<string, ActivityDecision>, options?: TemporalAdapterOptions): ActivityInterceptorFactory;
 
+/** Shaped like `@temporalio/worker`'s WorkerPlugin, without depending on its types. */
+export interface WarrantWorkerPlugin {
+  readonly name: "warrantai.WarrantPlugin";
+  configureWorker<T extends { interceptors?: { activity?: unknown[] } }>(options: T): T;
+}
+
+/** A worker plugin for `Worker.create({ plugins: [plugin] })` that installs the activity interceptor. */
+export function warrantPlugin(client: Warrant, decisions: Record<string, ActivityDecision>, options?: TemporalAdapterOptions): WarrantWorkerPlugin;
+
 /** Report a model call made inside an activity, so its cost lands on that activity's decision. Throws outside an activity. */
 export function modelUsage(provider: string, model: string, options?: { tokensIn?: number; tokensOut?: number }): void;

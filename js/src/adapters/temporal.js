@@ -4,10 +4,13 @@
  *   import { Worker } from "@temporalio/worker";
  *   import { ActivityDecision, warrantActivityInterceptor } from "warrantai/adapters/temporal";
  *
- *   const guard = warrantActivityInterceptor(w, {
+ *   const plugin = warrantPlugin(w, {
  *     disburse: new ActivityDecision({ decisionClass: "credit.disburse", subject: "loan_id", inputs: ["amount", "bureau_score", "foir"] }),
  *   });
- *   const worker = await Worker.create({ ..., activities, interceptors: { activity: [guard] } });
+ *   const worker = await Worker.create({ ..., activities, plugins: [plugin] });
+ *
+ * The plugin adds the activity interceptor to the worker; `warrantActivityInterceptor()` builds
+ * the interceptor factory on its own for `interceptors: { activity: [...] }`.
  *
  * Workflow code does not change. Before a mapped activity runs, its arguments are checked
  * against the policy. `deny` and `escalate` stop it: the attempt is recorded as withheld and the
@@ -106,6 +109,23 @@ export function warrantActivityInterceptor(client, decisions, { evidence = () =>
   const log = new EvidenceLog(maxRuns);
   const execute = (input, next) => run(client, decisions, evidence, pricer, log, input, next);
   return () => ({ inbound: { execute } });
+}
+
+/**
+ * A worker plugin for `Worker.create({ plugins: [...] })`: adds the activity interceptor built by
+ * `warrantActivityInterceptor(client, decisions, options)`. Named `warrantai.WarrantPlugin` in the
+ * worker's logs. An interceptor factory already present is not added twice.
+ */
+export function warrantPlugin(client, decisions, options = {}) {
+  const factory = warrantActivityInterceptor(client, decisions, options);
+  return {
+    name: "warrantai.WarrantPlugin",
+    configureWorker(workerOptions) {
+      const activity = [...(workerOptions.interceptors?.activity ?? [])];
+      if (!activity.includes(factory)) activity.push(factory);
+      return { ...workerOptions, interceptors: { ...workerOptions.interceptors, activity } };
+    },
+  };
 }
 
 async function run(client, decisions, isEvidence, pricer, log, input, next) {

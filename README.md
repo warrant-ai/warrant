@@ -56,6 +56,7 @@ The full SDK guide is in `python/README.md`.
 - `js/` the `warrantai` npm package.
 - `conformance/` the vectors and cases both SDKs must reproduce byte for byte: hashes, seals, signatures, Merkle proofs, admissibility verdicts and CEL policy evaluations. A verifier in any language is correct when it passes them.
 - `bench/` the handoff benchmark.
+- `integrations/` guides for running Warrant inside another platform: `temporal.md`.
 
 ## Developing
 

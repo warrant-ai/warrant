@@ -1,11 +1,11 @@
 """Workflow-side helpers for the Temporal adapter: explicit decisions and approvals from workflow code.
 
-Import this module inside ``workflow.unsafe.imports_passed_through()``. The worker's interceptor
-must see the same module object as the workflow code, and the SDK it belongs to is not written
-to be re-imported under the workflow sandbox.
+With ``WarrantPlugin`` on the worker, import this module like any other. Without the plugin,
+import it inside ``workflow.unsafe.imports_passed_through()``: the worker's interceptor must see
+the same module object as the workflow code, and the SDK it belongs to is not written to be
+re-imported under the workflow sandbox.
 
-    with workflow.unsafe.imports_passed_through():
-        from warrant.adapters import temporal_workflow as warrant
+    from warrant.adapters import temporal_workflow as warrant
 
     @workflow.defn
     class LoanApproval:
@@ -110,7 +110,10 @@ async def decide(
         "on_behalf_of": on_behalf_of,
         "identity": _identity(),
     }
-    return await workflow.execute_local_activity(RECORD_ACTIVITY, request, start_to_close_timeout=_RECORD_TIMEOUT, retry_policy=_RECORD_RETRY)
+    return await workflow.execute_local_activity(
+        RECORD_ACTIVITY, request, start_to_close_timeout=_RECORD_TIMEOUT, retry_policy=_RECORD_RETRY,
+        summary=f"warrant: {decision_class} for {subject}",
+    )
 
 
 async def approved(activity: Any, arg: Any = _unset, *, args: Sequence[Any] = (), reviewer: str, record_id: str, note: Optional[str] = None, **options: Any) -> Any:
@@ -161,7 +164,10 @@ async def verdict(record_id: str, *, reviewer: str, verdict: str, note: Optional
         "verdict": verdict,
         "note": note,
     }
-    return await workflow.execute_local_activity(RECORD_ACTIVITY, request, start_to_close_timeout=_RECORD_TIMEOUT, retry_policy=_RECORD_RETRY)
+    return await workflow.execute_local_activity(
+        RECORD_ACTIVITY, request, start_to_close_timeout=_RECORD_TIMEOUT, retry_policy=_RECORD_RETRY,
+        summary=f"warrant: {verdict} verdict on {record_id}",
+    )
 
 
 async def rejected(record_id: str, *, reviewer: str, note: Optional[str] = None) -> Dict[str, Any]:

@@ -3,6 +3,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: "0 3 * * 1"   # weekly, against the latest temporalio and other unpinned dependencies
 jobs:
   schema-in-sync:
     runs-on: ubuntu-latest

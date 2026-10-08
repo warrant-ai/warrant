@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **A Temporal plugin in both SDKs.** `Worker(..., plugins=[WarrantPlugin(guard)])` in Python installs the interceptor, registers the `warrant.record` local activity and passes `warrant` through the workflow sandbox, so workflow code imports the helpers like any other module; the same plugin configures `Replayer`. `warrantPlugin(w, decisions, options)` in JavaScript adds the activity interceptor to `Worker.create({ plugins })`. A guard also listed under `interceptors` is not installed twice. The interceptor and `warrantActivityInterceptor()` still work on their own. Named `warrant.WarrantPlugin` and `warrantai.WarrantPlugin` in worker logs, the form Temporal's partner programme asks for
+- The `warrant.record` local activity now carries a summary (`warrant: <class> for <subject>`, or the verdict) so it reads in the Temporal UI
+- `integrations/temporal.md`: the guide and the test plan for running Warrant on Temporal, in both languages
+- CI also runs weekly, so a Temporal SDK release that breaks the adapter is caught without a push
+
 ## 0.10.0 (2026-10-04)
 
 A document that is on file but was not relied on can be recorded without counting as evidence, and the two SDKs are now tested against each other on random records.

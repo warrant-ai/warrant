@@ -543,21 +543,22 @@ With `on_escalate="interrupt"` an escalation pauses the graph with LangGraph's `
 
 ```python
 from temporalio.worker import Worker
-from warrant.adapters.temporal import WarrantInterceptor
+from warrant.adapters.temporal import WarrantInterceptor, WarrantPlugin
 
 guard = WarrantInterceptor(w, {"disburse": ToolDecision("credit.disburse", subject="loan_id",
                                                         inputs=["amount", "bureau_score", "foir"])})
 worker = Worker(client, task_queue="lending-agents", workflows=[LoanApproval],
-                activities=[underwrite, disburse], interceptors=[guard])
+                activities=[underwrite, disburse], plugins=[WarrantPlugin(guard)])
 ```
+
+The plugin installs the interceptor, registers the `warrant.record` local activity for the workflow-side helpers below, and lets workflow code import `warrant` without `workflow.unsafe.imports_passed_through()`; give it to `Replayer(plugins=[...])` too. Without the plugin, pass `interceptors=[guard]`, add `guard.record_activity` to `activities`, and import the helpers under `imports_passed_through()`. The full guide, with the test plan, is `integrations/temporal.md`.
 
 Workflow code does not change: the decisions are the activities you name, keyed by activity type, and their arguments are read by parameter name (a single dataclass argument, field by field). A denied or escalated activity is recorded as withheld and fails with a non-retryable `ApplicationError` of type `WarrantDenied` or `WarrantEscalated`, so Temporal's retry policy does not re-run it and the workflow can catch it and hand the case to a person; the error's details carry the record id. Every record names the Temporal execution (namespace, workflow, run, activity, attempt) as evidence, so an auditor can open the run. One record per attempt: a failed attempt is a failed decision, a retry is a new record, and record ids are derived from the attempt's identity, so a batch delivered twice is written once. The run's other activities are evidence for its next decision, by hash, on the worker that ran them. `model_usage(provider, model, tokens_in=..., tokens_out=...)` called inside an activity puts the model call's cost on that activity's record. The policy check is in-process and recording is asynchronous, so Warrant being unreachable never touches an activity.
 
-Workflow code can make decisions of its own and hand approvals back to escalated activities. Register `guard.record_activity` in `activities` too, and import the helpers as Temporal asks for third-party modules in workflow code:
+Workflow code can make decisions of its own and hand approvals back to escalated activities:
 
 ```python
-with workflow.unsafe.imports_passed_through():
-    from warrant.adapters import temporal_workflow as warrant
+from warrant.adapters import temporal_workflow as warrant
 
 @workflow.defn
 class LoanApproval:

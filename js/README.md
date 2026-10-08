@@ -89,13 +89,15 @@ If your agent runs on Temporal, the activities you name as decisions are gated a
 
 ```js
 import { Worker } from "@temporalio/worker";
-import { ActivityDecision, warrantActivityInterceptor } from "warrantai/adapters/temporal";
+import { ActivityDecision, warrantPlugin } from "warrantai/adapters/temporal";
 
-const guard = warrantActivityInterceptor(w, {
+const plugin = warrantPlugin(w, {
   disburse: new ActivityDecision({ decisionClass: "credit.disburse", subject: "loan_id", inputs: ["amount", "bureau_score", "foir"] }),
 });
-const worker = await Worker.create({ ..., activities, interceptors: { activity: [guard] } });
+const worker = await Worker.create({ ..., activities, plugins: [plugin] });
 ```
+
+The plugin adds the activity interceptor to the worker and appears in its logs as `warrantai.WarrantPlugin`; `warrantActivityInterceptor(w, decisions, options)` builds the interceptor on its own for `interceptors: { activity: [...] }`. The full guide, with the test plan, is `integrations/temporal.md`.
 
 Before a mapped activity runs, its single object argument is checked against the policy (any other call shape is presented as `{ args }` for mapping functions to read). A denied or escalated activity is recorded as withheld and fails with a non-retryable `ApplicationFailure` of type `WarrantDenied` or `WarrantEscalated`, so the retry policy does not re-run it and the workflow can catch it and hand the case to a person; the failure's details carry the record id. Every record names the Temporal execution as evidence. One record per attempt, with ids derived from the attempt's identity, so a batch delivered twice is written once. The run's other activities are evidence for its next decision, by hash. `modelUsage(provider, model, { tokensIn, tokensOut })` inside an activity puts the model call's cost on the record. Workflow-side decisions and approval hand-offs are in the Python adapter today.
 
