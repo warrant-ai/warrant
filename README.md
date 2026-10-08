@@ -2,7 +2,7 @@
 
 The decision ledger for AI agents. Every consequential action an agent takes is recorded with the mandate that allowed it, the evidence it used, what it cost, and how it turned out. Developers replay real recorded decisions against a changed prompt, model or policy before shipping. Risk, finance and audit teams get records they can sample and verify without trusting the vendor.
 
-Status: pre-alpha. 0.1.0 shipped the Python `decide()` SDK, CEL policy checks, the local append-only store and verifier, replay with `warrant test`, OpenTelemetry evidence capture, and `warrant import` for existing trace exports; see `python/README.md`. 0.2.0 adds the collector and a PostgreSQL store for shared deployments, the JavaScript and TypeScript SDK (`js/README.md`), and policy bundles that evaluate identically in both languages (`conformance/`). 0.3.0 adds adapters for the Claude Agent SDK, LangGraph and Temporal (Python, and Temporal in JavaScript too), an MCP server, and a GitHub Action that replays recorded decisions in CI. 0.4.0 to 0.6.0 add outcomes, calibration, evidence packs, question sets, drift gates, dated policies, breakers and decision-model adapters. On main for 0.7.0: the Agent Decision Record (`spec/adr-0.2.md`), with issuer signing, admissibility rules and a warrant lifecycle, salted digests with erasure, witnessed checkpoints, cross-organisation trace, and an in-process Laya adapter.
+Status: pre-alpha. 0.1.0 shipped the Python `decide()` SDK, CEL policy checks, the local append-only store and verifier, replay with `warrant test`, OpenTelemetry evidence capture, and `warrant import` for existing trace exports; see `python/README.md`. 0.2.0 adds the collector and a PostgreSQL store for shared deployments, the JavaScript and TypeScript SDK (`js/README.md`), and policy bundles that evaluate identically in both languages (`conformance/`). 0.3.0 adds adapters for the Claude Agent SDK, LangGraph and Temporal (Python, and Temporal in JavaScript too), an MCP server, and a GitHub Action that replays recorded decisions in CI. 0.4.0 to 0.6.0 add outcomes, calibration, evidence packs, question sets, drift gates, dated policies, breakers and decision-model adapters. 0.7.0 to 0.10.0 add the Agent Decision Record (`spec/adr-0.2.md`): issuer signing with key validity judged at sealing time, admissibility rules and a warrant lifecycle in both SDKs, salted digests with erasure, witnessed checkpoints, cross-organisation trace, an in-process Laya adapter, RFC 8785 canonical seals, and a differential test that seals random records in one SDK and verifies them in the other. The full list is in `CHANGELOG.md`.
 
 | Package | Install | Import |
 |---|---|---|
@@ -54,7 +54,8 @@ The full SDK guide is in `python/README.md`.
 - `examples/` records that validate against the schema, a policy bundle, a trace export with its import taxonomy, and the lending gallery; used by the test suites and the quick start.
 - `python/` the `warrantai` Python package (module name `warrant`).
 - `js/` the `warrantai` npm package.
-- `docs/` scope and go-to-market working documents.
+- `conformance/` the vectors and cases both SDKs must reproduce byte for byte: hashes, seals, signatures, Merkle proofs, admissibility verdicts and CEL policy evaluations. A verifier in any language is correct when it passes them.
+- `bench/` the handoff benchmark.
 
 ## Developing
 
@@ -63,6 +64,10 @@ cd python && python -m venv .venv && .venv/bin/pip install -e ".[dev]" && .venv/
 cd js && npm install && npm test
 ```
 
+## Contributing
+
+Contributions from people and from coding agents are welcome, under the same gates: the conformance vectors, the shared policy cases and the differential test between the SDKs decide what is correct. `CONTRIBUTING.md` has the setup, the rules and the order in which to port the verifier to a new language; `AGENTS.md` is the operational subset for a coding agent. Questions go in [Discussions](https://github.com/warrant-ai/warrant/discussions); security problems go through `SECURITY.md`.
+
 ## Licence
 
-Apache 2.0.
+Apache 2.0 for the code. The specification in `spec/` is CC BY 4.0.

@@ -1,0 +1,45 @@
+name: Bug or finding
+description: Something the code does that the specification, the other SDK, or the documentation says it should not.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What the code did. Paste the output.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What should have happened
+      description: Cite the sentence in spec/adr-0.2.md, the conformance case, or the README that says so, if there is one.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `warrant --version`, for each SDK involved.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: The record, expression or export that reproduces it
+      description: Attach or paste. A record one SDK seals and the other rejects, or a CEL expression the two engines disagree on, is the most useful thing you can give us.
+      render: json
+  - type: dropdown
+    id: other
+    attributes:
+      label: Does the other SDK agree?
+      options:
+        - Did not check
+        - Yes, both SDKs behave the same way
+        - No, the other SDK behaves differently (say how above)
+        - Only one SDK is involved
+  - type: input
+    id: author
+    attributes:
+      label: Found by
+      description: A person, or an agent and which model.

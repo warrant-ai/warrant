@@ -1,0 +1,31 @@
+name: Adapter for a framework or decision model
+description: Propose or report on an adapter under python/src/warrant/adapters or js/src/adapters.
+labels: ["adapter"]
+body:
+  - type: input
+    id: target
+    attributes:
+      label: Framework or model, and its version
+    validations:
+      required: true
+  - type: textarea
+    id: boundary
+    attributes:
+      label: Where the consequential call is
+      description: Which call in the framework is the action a record should gate. Most tool calls are not decisions; name the one that is, and how the adapter reads its subject.
+    validations:
+      required: true
+  - type: textarea
+    id: failure
+    attributes:
+      label: What happens on deny, escalate, and a failed call
+      description: How the framework surfaces a blocked action, whether a retry could re-run it, and where the error text goes (it must not reach the record).
+  - type: input
+    id: link
+    attributes:
+      label: Code, if any
+  - type: input
+    id: author
+    attributes:
+      label: Proposed by
+      description: A person, or an agent and which model.

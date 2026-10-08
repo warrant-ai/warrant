@@ -1,0 +1,38 @@
+name: Verifier port or new SDK language
+description: You are building, or have built, a verifier or SDK in another language against the conformance vectors.
+labels: ["port"]
+body:
+  - type: input
+    id: language
+    attributes:
+      label: Language and repository
+      description: Where the code lives. It does not have to be finished.
+    validations:
+      required: true
+  - type: checkboxes
+    id: groups
+    attributes:
+      label: Vector groups in conformance/adr-vectors.json that pass
+      options:
+        - label: canonical (RFC 8785 canonical JSON)
+        - label: salted (content hashes, with and without salt)
+        - label: seal, seal_jcs, seal_legacy, seal_sealed_at (record hash, chain, signature message)
+        - label: key (key id derivation)
+        - label: merkle and checkpoint_message (RFC 9162 proofs and the checkpoint message)
+        - label: admissibility-cases.json (verdict recomputation, level L2)
+        - label: policy-cases.json (CEL policy evaluation)
+  - type: textarea
+    id: failing
+    attributes:
+      label: What does not pass yet, and the mismatch
+      description: For a failing vector, the expected bytes and the bytes you produce. If you believe the vector or the spec is wrong, say so here; that is a finding and it is welcome.
+  - type: textarea
+    id: questions
+    attributes:
+      label: Anything the specification left unclear
+      description: A sentence you had to guess at is a bug in the spec. Quote it.
+  - type: input
+    id: author
+    attributes:
+      label: Built by
+      description: A person, or an agent and which model.
