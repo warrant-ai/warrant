@@ -21,9 +21,9 @@ refuses to send rather than discovering the problem in an audit.
 **No Jev vocabulary reaches the record schema.** Nouls, choices and scores are normalised to a
 value, a confidence and a distribution before anything is written. See :mod:`warrant.adapters.base`.
 
-**A field called confidence is not necessarily a confidence.** Jev's ``confidence`` is a margin
-between the top two probabilities, not the probability of the value it chose, and a Score's is
-neither. Warrant's ``confidence`` means the stated probability that ``value`` is right, because
+**A field called confidence is not necessarily a confidence.** Jev's ``confidence`` measures how
+far the top probability sits above an even split (``2p - 1`` on a two-option Choice), not the
+probability of the value it chose, and a Score's measures spread around the most likely level. Warrant's ``confidence`` means the stated probability that ``value`` is right, because
 that is what calibration and every confidence floor in a policy read it as. :func:`normalise_answer`
 produces that quantity from the distribution, or leaves it out.
 """
@@ -77,11 +77,12 @@ def normalise_answer(question: str, answer: Any) -> ModelAnswer:
     floor reads it that way. So an adapter's job here is not to copy the vendor's field of the same
     name — it is to produce that quantity, or produce nothing.
 
-    Jev's own ``confidence`` is not that quantity. On a Choice it is the **margin** between the top
-    two probabilities: an answer with ``{escalate: 0.91, close: 0.09}`` reports ``0.82``, not the
-    0.91 the model actually claims. Passing it straight through understated the stated probability
-    by 0.238 on average over a live set of 60, and put a margin on the x-axis of a curve whose
-    x-axis is a probability. The probability is right there in ``probabilities``, so a Choice takes
+    Jev's own ``confidence`` is not that quantity. On a Choice with ``n`` options it is
+    ``(p_max - 1/n) / (1 - 1/n)``, the distance of the top probability above an even split, as
+    TypeSafe's confidence page defines it: an answer with ``{escalate: 0.91, close: 0.09}`` reports
+    ``0.82``, not the 0.91 the model actually claims. Passing it straight through understated the
+    stated probability by 0.238 on average over a live set of 60, and put a rescaled number on the
+    x-axis of a curve whose x-axis is a probability. The probability is right there in ``probabilities``, so a Choice takes
     it from there and falls back to the vendor's number only if the distribution is missing.
 
     A Noul carries no confidence field at all: it is a single probability where 0.5 means "no idea".

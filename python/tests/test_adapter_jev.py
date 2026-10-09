@@ -52,9 +52,9 @@ def _response(answers, *, model="jev-1.13.0", tokens_in=1800, tokens_out=0):
 
 
 def _choice(value="close", confidence=0.88, probabilities=_DEFAULT):
-    # Jev's `confidence` is the margin between the top two probabilities, so it is deliberately
-    # NOT equal to p(chosen) here. An earlier fake set the two to the same number, which is exactly
-    # why the adapter recording the margin as a confidence went unnoticed until a live call.
+    # Jev's `confidence` on a two-option Choice is 2p - 1, so it is deliberately NOT equal to
+    # p(chosen) here. An earlier fake set the two to the same number, which is exactly why the
+    # adapter recording the vendor's number as a confidence went unnoticed until a live call.
     if probabilities is _DEFAULT:
         probabilities = {"close": 0.94, "escalate": 0.06}
     return typesafe_sdk.ChoiceAnswer(
@@ -114,10 +114,10 @@ def test_a_choice_keeps_its_distribution_not_only_the_winner():
     assert answer.distribution == {"close": 0.94, "escalate": 0.06}
 
 
-def test_a_choice_states_the_probability_of_its_value_not_the_vendors_margin():
+def test_a_choice_states_the_probability_of_its_value_not_the_vendors_confidence():
     # The record's `confidence` is read as "the stated probability that `value` is right" by every
-    # reliability curve and every confidence floor in a policy. Jev's own field is the margin
-    # between the top two probabilities (0.94 - 0.06), which is a smaller, different quantity.
+    # reliability curve and every confidence floor in a policy. Jev's own field is the distance
+    # above an even split (2 * 0.94 - 1 on two options), which is a smaller, different quantity.
     answer = normalise_answer("disposition", _choice(confidence=0.88))
     assert answer.confidence == 0.94
 
