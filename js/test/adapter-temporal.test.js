@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { Warrant, deterministicUlid, validate } from "../src/index.js";
+import { Warrant, contentHash, deterministicUlid, validate } from "../src/index.js";
 
 const [major, minor] = process.versions.node.split(".").map(Number);
 const skip = major > 20 || (major === 20 && minor >= 3) ? false : "the Temporal TypeScript SDK needs Node 20.3+";
@@ -50,6 +50,9 @@ function activities(modelUsage, Context) {
       modelUsage("anthropic", "claude-sonnet-5", { tokensIn: 1200, tokensOut: 80 });
       return `disbursed ${loan.loan_id}`;
     },
+    async disburseDown() {
+      throw new Error("core banking unavailable");
+    },
     async disburseFlaky(loan) {
       if (Context.current().info.attempt === 1) throw new Error("core banking timeout for PAN ABCDE1234F");
       return `disbursed ${loan.loan_id}`;
@@ -60,15 +63,17 @@ function activities(modelUsage, Context) {
   };
 }
 
-async function run(guard, loan, mode, { plugins } = {}) {
+/** Run the loan workflow once. `decisions` registers the workflow interceptor module beside `guard`, as the plugin would. */
+async function run(guard, loan, mode, { plugins, decisions } = {}) {
   const { TestWorkflowEnvironment, Worker, activity, adapter } = await load();
+  const interceptors = { activity: [guard], workflowModules: decisions ? [adapter.warrantWorkflowInterceptorModule(decisions)] : [] };
   const env = await TestWorkflowEnvironment.createTimeSkipping();
   try {
     const worker = await Worker.create({
       connection: env.nativeConnection, taskQueue: "lending-agents",
       workflowsPath: fileURLToPath(new URL("./temporal-workflows.js", import.meta.url)),
       activities: activities(adapter.modelUsage, activity.Context),
-      ...(plugins ? { plugins } : { interceptors: { activity: [guard] } }),
+      ...(plugins ? { plugins } : { interceptors }),
     });
     return await worker.runUntil(env.client.workflow.execute("loanWorkflow", { args: [loan, mode], taskQueue: "lending-agents", workflowId: `loan-${Date.now()}-${Math.random()}` }));
   } finally {
@@ -81,7 +86,8 @@ const DISBURSE = (adapter) => new adapter.ActivityDecision({ decisionClass: "cre
 test("an allowed activity runs and is recorded with evidence, identity and cost", { skip }, async () => {
   const { adapter } = await load();
   const { w, records } = await ledger();
-  const out = await run(adapter.warrantActivityInterceptor(w, { disburse: DISBURSE(adapter) }, { pricer: (p, m, i, o) => i * 0.001 + o * 0.005 }), GOOD, "object");
+  const decisions = { disburse: DISBURSE(adapter) };
+  const out = await run(adapter.warrantActivityInterceptor(w, decisions, { pricer: (p, m, i, o) => i * 0.001 + o * 0.005 }), GOOD, "object", { decisions });
   assert.deepEqual(out, { result: "disbursed LN-1" });
   const [decision] = await records();
   validate(decision);
@@ -100,9 +106,10 @@ test("an allowed activity runs and is recorded with evidence, identity and cost"
 test("deny and escalate withhold and fail the activity without retry", { skip }, async () => {
   const { adapter } = await load();
   const { w, records } = await ledger();
-  const guard = adapter.warrantActivityInterceptor(w, { disburse: DISBURSE(adapter) });
-  const weak = await run(guard, WEAK, "object");
-  const big = await run(guard, BIG, "object");
+  const decisions = { disburse: DISBURSE(adapter) };
+  const guard = adapter.warrantActivityInterceptor(w, decisions);
+  const weak = await run(guard, WEAK, "object", { decisions });
+  const big = await run(guard, BIG, "object", { decisions });
   assert.equal(weak.blocked, "WarrantDenied");
   assert.match(weak.message, /policy CR-07 clause 4\.1 does not allow it.*Do not retry/);
   assert.equal(big.blocked, "WarrantEscalated");
@@ -131,7 +138,8 @@ test("an unreadable call is blocked and is not a decision", { skip }, async () =
 test("a failed attempt is recorded without error text and the retry is a new record", { skip }, async () => {
   const { adapter } = await load();
   const { w, records } = await ledger();
-  const out = await run(adapter.warrantActivityInterceptor(w, { disburseFlaky: DISBURSE(adapter) }), GOOD, "flaky");
+  const decisions = { disburseFlaky: DISBURSE(adapter) };
+  const out = await run(adapter.warrantActivityInterceptor(w, decisions), GOOD, "flaky", { decisions });
   assert.deepEqual(out, { result: "disbursed LN-1" });
   const [failed, acted] = await records();
   assert.deepEqual([failed.decision.status, acted.decision.status], ["failed", "acted"]);
@@ -141,6 +149,90 @@ test("a failed attempt is recorded without error text and the retry is a new rec
   assert.notEqual(failed.record_id, acted.record_id);
   assert.deepEqual(failed.evidence.map((e) => e.name), ["temporal.execution", "underwrite"], "a failed attempt does not consume the run's evidence");
   assert.deepEqual(acted.evidence.map((e) => e.name), ["temporal.execution", "underwrite", "disburseFlaky.result"]);
+  await w.close();
+});
+
+/**
+ * Three workers, each with its own plugin, as three processes would have: the workflow on one, the
+ * evidence activity on a second, the decision on a third. Replays the run afterwards.
+ */
+async function spread(workflowGuarded) {
+  const { TestWorkflowEnvironment, Worker, activity, adapter } = await load();
+  const { w, records } = await ledger();
+  const plugin = () => adapter.warrantPlugin(w, { disburse: DISBURSE(adapter) });
+  const env = await TestWorkflowEnvironment.createTimeSkipping();
+  try {
+    const acts = activities(adapter.modelUsage, activity.Context);
+    const workflowsPath = fileURLToPath(new URL("./temporal-workflows.js", import.meta.url));
+    const flow = await Worker.create({ connection: env.nativeConnection, taskQueue: "lending-flow", workflowsPath, ...(workflowGuarded ? { plugins: [plugin()] } : {}) });
+    const bureau = await Worker.create({ connection: env.nativeConnection, taskQueue: "lending-bureau", activities: { underwrite: acts.underwrite }, plugins: [plugin()] });
+    const payments = await Worker.create({ connection: env.nativeConnection, taskQueue: "lending-payments", activities: { disburse: acts.disburse }, plugins: [plugin()] });
+    const workflowId = `loan-${Date.now()}-${Math.random()}`;
+    const out = await payments.runUntil(bureau.runUntil(flow.runUntil(env.client.workflow.execute("spreadLoanWorkflow", { args: [GOOD], taskQueue: "lending-flow", workflowId }))));
+    const history = await env.client.workflow.getHandle(workflowId).fetchHistory();
+    await Worker.runReplayHistory({ workflowsPath, plugins: [plugin()] }, history, workflowId);
+    return { out, records: await records(), w };
+  } finally {
+    await env.teardown();
+  }
+}
+
+test("the evidence reaches a decision that runs on another worker, and the run replays", { skip }, async () => {
+  const { out, records, w } = await spread(true);
+  assert.equal(out, "disbursed LN-1");
+  const [decision] = records;
+  validate(decision);
+  assert.deepEqual(decision.evidence.map((e) => e.name), ["temporal.execution", "underwrite", "disburse.result", "anthropic/claude-sonnet-5"]);
+  const underwrite = decision.evidence[1];
+  assert.equal(underwrite.uri, "tool://underwrite#1");
+  // The hash Python computes for the same result (python/tests/test_adapter_temporal.py), so either SDK can produce or read the header.
+  assert.equal(underwrite.content_hash, contentHash({ loan_id: "LN-1", band: "A" }));
+  await w.close();
+});
+
+test("without the workflow interceptor on the workflow's worker, a decision cites no evidence", { skip }, async () => {
+  const { out, records, w } = await spread(false);
+  assert.equal(out, "disbursed LN-1");
+  assert.deepEqual(records[0].evidence.map((e) => e.name), ["temporal.execution", "disburse.result", "anthropic/claude-sonnet-5"]);
+  await w.close();
+});
+
+test("a decision that fails outright leaves the evidence for the next", { skip }, async () => {
+  const { adapter } = await load();
+  const { w, records } = await ledger();
+  const decisions = { disburseDown: DISBURSE(adapter), disburse: DISBURSE(adapter) };
+  const out = await run(adapter.warrantActivityInterceptor(w, decisions), GOOD, "down", { decisions });
+  assert.deepEqual(out, { result: "disbursed LN-1" });
+  const all = await records();
+  const failed = all.filter((r) => r.decision.status === "failed");
+  const [acted] = all.filter((r) => r.decision.status === "acted");
+  assert.equal(failed.length, 3);
+  for (const r of failed) assert.deepEqual(r.evidence.map((e) => e.name), ["temporal.execution", "underwrite"]);
+  assert.deepEqual(acted.evidence.map((e) => e.name), ["temporal.execution", "underwrite", "disburse.result", "anthropic/claude-sonnet-5"]);
+  await w.close();
+});
+
+test("the workflow-side evidence hash equals contentHash for any activity result", async () => {
+  const { evidenceHash, asEvidenceContent } = await import("../src/adapters/temporal-shared.js");
+  const values = ["disbursed LN-1", "", 0, -1.5e-7, 1e21, true, null, [1, "two", { three: 3 }], { b: 1, a: [{ d: undefined, c: "₹😀" }] }, { when: new Date(0) }, new Uint8Array([1, 2, 3])];
+  for (let i = 0; i < 500; i++) values.push({ n: Math.random() * 10 ** ((i % 40) - 20), s: String.fromCharCode(...Array.from({ length: i % 9 }, () => Math.floor(Math.random() * 0xd7ff))), i });
+  for (const value of values) assert.equal(evidenceHash(value), contentHash(asEvidenceContent(value)), JSON.stringify(value));
+});
+
+test("an undecodable evidence header blocks the decision as unreadable", { skip }, async () => {
+  const { adapter } = await load();
+  const { MockActivityEnvironment } = await import("@temporalio/testing");
+  const { w, records } = await ledger();
+  const { inbound } = adapter.warrantActivityInterceptor(w, { disburse: DISBURSE(adapter) })();
+  const bad = { metadata: { encoding: new TextEncoder().encode("binary/plain") }, data: new Uint8Array([1]) };
+  let ran = false;
+  const env = new MockActivityEnvironment({ activityType: "disburse" });
+  await assert.rejects(
+    env.run(() => inbound.execute({ args: [GOOD], headers: { "warrant-evidence": bad } }, async () => { ran = true; })),
+    (err) => err.type === "WarrantUnreadable" && /evidence header could not be decoded/.test(err.message),
+  );
+  assert.equal(ran, false);
+  assert.deepEqual(await records(), []);
   await w.close();
 });
 
@@ -183,10 +275,12 @@ test("the plugin keeps interceptors the worker already has and never adds its ow
   const other = () => ({});
   const once = plugin.configureWorker({ taskQueue: "q", interceptors: { activity: [other], workflowModules: ["x"] } });
   assert.equal(once.taskQueue, "q");
-  assert.deepEqual(once.interceptors.workflowModules, ["x"]);
+  assert.deepEqual(once.interceptors.workflowModules, ["x", adapter.warrantWorkflowInterceptorModule({ disburse: DISBURSE(adapter) })]);
   assert.equal(once.interceptors.activity.length, 2);
   assert.equal(once.interceptors.activity[0], other);
   const twice = plugin.configureWorker(once);
   assert.equal(twice.interceptors.activity.length, 2);
+  assert.equal(twice.interceptors.workflowModules.length, 2);
+  assert.deepEqual(plugin.configureReplayWorker({ interceptors: {} }).interceptors.workflowModules, [once.interceptors.workflowModules[1]]);
   await w.close();
 });

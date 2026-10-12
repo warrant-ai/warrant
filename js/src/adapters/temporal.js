@@ -9,17 +9,21 @@
  *   });
  *   const worker = await Worker.create({ ..., activities, plugins: [plugin] });
  *
- * The plugin adds the activity interceptor to the worker; `warrantActivityInterceptor()` builds
- * the interceptor factory on its own for `interceptors: { activity: [...] }`.
+ * The plugin adds the activity interceptor and registers the workflow interceptor module
+ * (`temporal-workflow.js`) for the worker's workflow bundle. Without the plugin, give the worker
+ * `interceptors: { activity: [warrantActivityInterceptor(...)], workflowModules: [warrantWorkflowInterceptorModule(decisions)] }`.
+ * Put the plugin on every worker: the ones that run the workflow and the ones that run its activities.
  *
  * Workflow code does not change. Before a mapped activity runs, its arguments are checked
  * against the policy. `deny` and `escalate` stop it: the attempt is recorded as withheld and the
  * activity fails with a non-retryable ApplicationFailure of type `WarrantDenied` or
  * `WarrantEscalated`, which the workflow can catch and route to a person. `allow` and
  * `unchecked` change nothing. After the activity returns, the decision is recorded with the
- * run's other activity results attached as evidence, by hash, and with the Temporal identity
- * (namespace, workflow, run, activity, attempt) as evidence. An activity that throws is
- * recorded as a failed decision, without its error text.
+ * run's earlier activity results attached as evidence, by hash, and with the Temporal identity
+ * (namespace, workflow, run, activity, attempt) as evidence. The workflow interceptor keeps those
+ * hashes in workflow state and passes them in the `warrant-evidence` header, so they reach the
+ * decision on whichever worker runs it. An activity that throws is recorded as a failed decision,
+ * without its error text.
  *
  * The arguments a mapping reads are the activity's single object argument, the usual Temporal
  * shape; any other shape is presented as `{ args }`, for mapping functions to read.
@@ -29,18 +33,21 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import { mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { ApplicationFailure, Context } from "@temporalio/activity";
 
 import { Verdict } from "../client.js";
-import { contentHash } from "../hashing.js";
+import { contentHash, sha256Hex } from "../hashing.js";
 import { deterministicUlid } from "../ids.js";
+import { DENIED, ESCALATED, EVIDENCE_HEADER, MAX_EVIDENCE, UNREADABLE, asEvidenceContent } from "./temporal-shared.js";
 
-export const DENIED = "WarrantDenied";
-export const ESCALATED = "WarrantEscalated";
-export const UNREADABLE = "WarrantUnreadable";
+export { DENIED, ESCALATED, EVIDENCE_HEADER, UNREADABLE };
 
-const MAX_EVIDENCE = 100;
+const WORKFLOW_MODULE = fileURLToPath(new URL("./temporal-workflow.js", import.meta.url));
 const usage = new AsyncLocalStorage();
 
 class AdapterError extends Error {}
@@ -97,51 +104,80 @@ export function modelUsage(provider, model, { tokensIn = 0, tokensOut = 0 } = {}
  * Build the interceptor factory for `Worker.create({ interceptors: { activity: [factory] } })`.
  * `decisions` is keyed by activity type. `evidence(activityType)` says which unmapped activities are
  * evidence for the run's next decision (all, by default). `pricer(provider, model, tokensIn, tokensOut)`
- * prices reported model usage. `maxRuns` bounds how many runs' evidence is remembered.
+ * prices reported model usage. The evidence itself arrives from the workflow interceptor; see
+ * `warrantWorkflowInterceptorModule()`.
  */
-export function warrantActivityInterceptor(client, decisions, { evidence = () => true, pricer, maxRuns = 1000 } = {}) {
+export function warrantActivityInterceptor(client, decisions, { evidence = () => true, pricer } = {}) {
   if (!client || typeof client.decide !== "function") throw new TypeError("client must be a Warrant instance");
   if (!decisions || Object.keys(decisions).length === 0) throw new TypeError("decisions is empty: name at least one activity type whose runs are decisions");
   for (const [type, mapping] of Object.entries(decisions)) {
     if (!(mapping instanceof ActivityDecision)) throw new TypeError(`decisions[${JSON.stringify(type)}] must be an ActivityDecision`);
   }
-  if (!Number.isInteger(maxRuns) || maxRuns < 1) throw new RangeError("maxRuns must be a positive integer");
-  const log = new EvidenceLog(maxRuns);
-  const execute = (input, next) => run(client, decisions, evidence, pricer, log, input, next);
+  const execute = (input, next) => run(client, decisions, evidence, pricer, input, next);
   return () => ({ inbound: { execute } });
 }
 
 /**
- * A worker plugin for `Worker.create({ plugins: [...] })`: adds the activity interceptor built by
- * `warrantActivityInterceptor(client, decisions, options)`. Named `warrantai.WarrantPlugin` in the
- * worker's logs. An interceptor factory already present is not added twice.
+ * The path of a workflow interceptor module for these decisions, for `interceptors.workflowModules`
+ * or `bundleWorkflowCode({ workflowInterceptorModules })`. Workflow code runs in Temporal's sandbox
+ * and cannot be handed the decision mapping at run time, so the module is written once per set of
+ * activity types, under the system temporary directory, named by their hash.
+ */
+export function warrantWorkflowInterceptorModule(decisions) {
+  const types = Object.keys(decisions ?? {}).sort();
+  if (types.length === 0) throw new TypeError("decisions is empty: name at least one activity type whose runs are decisions");
+  const source = `import { warrantWorkflowInterceptors } from ${JSON.stringify(WORKFLOW_MODULE)};\nexport const interceptors = warrantWorkflowInterceptors(${JSON.stringify(types)});\n`;
+  const dir = join(tmpdir(), "warrantai-temporal");
+  const path = join(dir, `workflow-${sha256Hex(source).slice(0, 16)}.js`);
+  mkdirSync(dir, { recursive: true });
+  // Written whole and renamed into place, so a worker starting at the same moment never bundles half a file.
+  const partial = `${path}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(partial, source);
+  renameSync(partial, path);
+  return path;
+}
+
+/**
+ * A worker plugin for `Worker.create({ plugins: [...] })` and replay workers: adds the activity
+ * interceptor built by `warrantActivityInterceptor(client, decisions, options)` and the workflow
+ * interceptor module from `warrantWorkflowInterceptorModule(decisions)`. Named
+ * `warrantai.WarrantPlugin` in the worker's logs. Neither is added twice. A worker given a prebuilt
+ * `workflowBundle` ignores `workflowModules`: pass the module to `bundleWorkflowCode` instead.
  */
 export function warrantPlugin(client, decisions, options = {}) {
   const factory = warrantActivityInterceptor(client, decisions, options);
+  let workflowModule;
+  const withInterceptors = (workerOptions) => {
+    workflowModule ??= warrantWorkflowInterceptorModule(decisions);
+    const activity = [...(workerOptions.interceptors?.activity ?? [])];
+    if (!activity.includes(factory)) activity.push(factory);
+    const workflowModules = [...(workerOptions.interceptors?.workflowModules ?? [])];
+    if (!workflowModules.includes(workflowModule)) workflowModules.push(workflowModule);
+    return { ...workerOptions, interceptors: { ...workerOptions.interceptors, activity, workflowModules } };
+  };
   return {
     name: "warrantai.WarrantPlugin",
-    configureWorker(workerOptions) {
-      const activity = [...(workerOptions.interceptors?.activity ?? [])];
-      if (!activity.includes(factory)) activity.push(factory);
-      return { ...workerOptions, interceptors: { ...workerOptions.interceptors, activity } };
+    configureWorker: withInterceptors,
+    configureReplayWorker(replayOptions) {
+      workflowModule ??= warrantWorkflowInterceptorModule(decisions);
+      const workflowModules = [...(replayOptions.interceptors?.workflowModules ?? [])];
+      if (!workflowModules.includes(workflowModule)) workflowModules.push(workflowModule);
+      return { ...replayOptions, interceptors: { ...replayOptions.interceptors, workflowModules } };
     },
   };
 }
 
-async function run(client, decisions, isEvidence, pricer, log, input, next) {
+async function run(client, decisions, isEvidence, pricer, input, next) {
   const info = Context.current().info;
   const wf = info.workflowExecution ?? { workflowId: "", runId: "" };
-  const runKey = `${wf.workflowId}/${wf.runId}`;
   const mapping = decisions[info.activityType];
-  if (!mapping) {
-    const result = await next(input);
-    if (isEvidence(info.activityType)) log.add(runKey, info.activityType, info.activityId, result);
-    return result;
-  }
+  if (!mapping) return next(input);
 
   let read;
+  let cited;
   try {
     read = mapping.read(info.activityType, callObject(input.args));
+    cited = evidenceFrom(input.headers).filter((item) => isEvidence(item.name));
   } catch (err) {
     if (!(err instanceof AdapterError)) throw err;
     client._log?.warn?.(`warrant: ${info.activityType} blocked, not a decision: ${err.message}`);
@@ -154,7 +190,7 @@ async function run(client, decisions, isEvidence, pricer, log, input, next) {
   const verdict = client.policy ? client.policy.evaluate(mapping.decisionClass, inputs) : new Verdict("unchecked", { reason: "no policy engine configured" });
   if (verdict.result === "deny" || verdict.result === "escalate") {
     const note = verdict.result === "escalate" ? "awaiting a human's decision; the activity was not run" : undefined;
-    await record(client, mapping, info.activityType, subject, inputs, { status: "withheld", recordId, evidence: [identity, ...log.take(runKey)], humanNote: note, pricer });
+    await record(client, mapping, info.activityType, subject, inputs, { status: "withheld", recordId, evidence: [identity, ...cited], humanNote: note, pricer });
     throw ApplicationFailure.nonRetryable(blockedMessage(info.activityType, verdict), verdict.result === "escalate" ? ESCALATED : DENIED, {
       record_id: recordId, decision_class: mapping.decisionClass, subject, result: verdict.result,
       policy_id: verdict.policyId ?? null, clause: verdict.clause ?? null, reason: verdict.reason ?? null,
@@ -166,11 +202,11 @@ async function run(client, decisions, isEvidence, pricer, log, input, next) {
   try {
     result = await usage.run(used, () => next(input));
   } catch (err) {
-    // A failed attempt keeps the run's evidence for the next attempt. The error text is not recorded: it can carry customer data.
-    await record(client, mapping, info.activityType, subject, inputs, { status: "failed", recordId, evidence: [identity, ...log.peek(runKey)], usage: used, pricer });
+    // The error text is not recorded: it can carry customer data.
+    await record(client, mapping, info.activityType, subject, inputs, { status: "failed", recordId, evidence: [identity, ...cited], usage: used, pricer });
     throw err;
   }
-  await record(client, mapping, info.activityType, subject, inputs, { status: "acted", recordId, evidence: [identity, ...log.take(runKey)], result, usage: used, pricer });
+  await record(client, mapping, info.activityType, subject, inputs, { status: "acted", recordId, evidence: [identity, ...cited], result, usage: used, pricer });
   return result;
 }
 
@@ -229,36 +265,20 @@ function identityEvidence(info, wf) {
   return { name: "temporal.execution", uri, type: "other", contentHash: contentHash(fields) };
 }
 
-function asEvidenceContent(value) {
+/** The run's evidence the workflow interceptor attached, or none when the workflow's worker has no interceptor. */
+function evidenceFrom(headers) {
+  const payload = headers?.[EVIDENCE_HEADER];
+  if (payload === undefined) return [];
   try {
-    return JSON.parse(JSON.stringify(value));
-  } catch {
-    return String(value);
-  }
-}
-
-/** Activity results seen in one run, kept as hashes only, waiting for the run's next decision. */
-class EvidenceLog {
-  constructor(maxRuns) {
-    this._byRun = new Map();
-    this._maxRuns = maxRuns;
-  }
-
-  add(run, activityType, activityId, result) {
-    const items = this._byRun.get(run) ?? [];
-    this._byRun.delete(run);
-    items.push({ name: activityType, uri: `tool://${activityType}#${activityId}`, type: "tool_call", contentHash: contentHash(asEvidenceContent(result)) });
-    this._byRun.set(run, items.slice(-MAX_EVIDENCE));
-    while (this._byRun.size > this._maxRuns) this._byRun.delete(this._byRun.keys().next().value);
-  }
-
-  peek(run) {
-    return [...(this._byRun.get(run) ?? [])];
-  }
-
-  take(run) {
-    const items = this._byRun.get(run) ?? [];
-    this._byRun.delete(run);
-    return items;
+    // Written by defaultPayloadConverter in workflow code (or the Python adapter's), always as json/plain.
+    const encoding = new TextDecoder().decode(payload.metadata?.encoding);
+    if (encoding !== "json/plain") throw new TypeError(`encoding ${encoding}`);
+    const items = JSON.parse(new TextDecoder().decode(payload.data));
+    return items.map((item) => {
+      if (typeof item.name !== "string" || typeof item.uri !== "string" || typeof item.content_hash !== "string") throw new TypeError("item shape");
+      return { name: item.name, uri: item.uri, type: "tool_call", contentHash: item.content_hash };
+    });
+  } catch (err) {
+    throw new AdapterError(`the evidence header could not be decoded: ${err?.constructor?.name ?? "Error"}`);
   }
 }

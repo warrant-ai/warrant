@@ -1,13 +1,21 @@
 // The two-activity loan workflow the Temporal adapter tests run. Bundled by the worker; imports only @temporalio/workflow.
 import { ActivityFailure, ApplicationFailure, proxyActivities } from "@temporalio/workflow";
 
-const { underwrite, disburse, disburseFlaky, disburseOpaque } = proxyActivities({
+const { underwrite, disburse, disburseDown, disburseFlaky, disburseOpaque } = proxyActivities({
   startToCloseTimeout: "10s",
   retry: { initialInterval: "10ms", maximumAttempts: 3 },
 });
 
 export async function loanWorkflow(loan, mode) {
   await underwrite(loan);
+  if (mode === "down") {
+    try {
+      await disburseDown(loan);
+    } catch (err) {
+      if (!(err instanceof ActivityFailure)) throw err;
+    }
+    return { result: await disburse(loan) };
+  }
   try {
     let result;
     if (mode === "object") result = await disburse(loan);
@@ -21,4 +29,13 @@ export async function loanWorkflow(loan, mode) {
     }
     throw err;
   }
+}
+
+// The evidence and the decision on different task queues, so on different workers.
+const bureau = proxyActivities({ taskQueue: "lending-bureau", startToCloseTimeout: "10s", retry: { initialInterval: "10ms", maximumAttempts: 3 } });
+const payments = proxyActivities({ taskQueue: "lending-payments", startToCloseTimeout: "10s", retry: { initialInterval: "10ms", maximumAttempts: 3 } });
+
+export async function spreadLoanWorkflow(loan) {
+  await bureau.underwrite(loan);
+  return await payments.disburse(loan);
 }
