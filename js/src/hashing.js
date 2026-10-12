@@ -10,17 +10,9 @@
 
 import { createHash } from "node:crypto";
 
-export function canonicalJson(value) {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  if (value !== null && typeof value === "object") {
-    const keys = Object.keys(value).filter((k) => value[k] !== undefined).sort();
-    return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalJson(value[k])}`).join(",")}}`;
-  }
-  if (typeof value === "number" && !Number.isFinite(value)) throw new TypeError("NaN and Infinity have no canonical JSON form");
-  const text = JSON.stringify(value);
-  if (text === undefined) throw new TypeError(`value is not JSON-serialisable: ${typeof value}`);
-  return text;
-}
+import { canonicalJson } from "./canonical.js";
+
+export { canonicalJson };
 
 /** The canonical form new records are sealed under, written to `seal.canon`. */
 export const CANON = "jcs";

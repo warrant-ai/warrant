@@ -3,6 +3,8 @@ import type { Warrant } from "../index.js";
 export const DENIED: "WarrantDenied";
 export const ESCALATED: "WarrantEscalated";
 export const UNREADABLE: "WarrantUnreadable";
+/** The header the workflow interceptor carries the run's evidence in, shared with the Python adapter. */
+export const EVIDENCE_HEADER: "warrant-evidence";
 
 /** The activity's single object argument, or `{ args }` for any other call shape. */
 export type ActivityArguments = Record<string, unknown>;
@@ -36,8 +38,6 @@ export interface TemporalAdapterOptions {
   /** Which unmapped activities are evidence for the run's next decision. All, by default. */
   evidence?: (activityType: string) => boolean;
   pricer?: Pricer;
-  /** How many runs' evidence to remember; the oldest are forgotten first. Default 1000. */
-  maxRuns?: number;
 }
 
 /** Shaped like `@temporalio/worker`'s ActivityInterceptorsFactory, without depending on its types. */
@@ -48,13 +48,20 @@ export type ActivityInterceptorFactory = (ctx: unknown) => {
 /** Build the factory for `Worker.create({ interceptors: { activity: [factory] } })`. */
 export function warrantActivityInterceptor(client: Warrant, decisions: Record<string, ActivityDecision>, options?: TemporalAdapterOptions): ActivityInterceptorFactory;
 
+/**
+ * Path of the workflow interceptor module for these decisions, for `interceptors.workflowModules`
+ * or `bundleWorkflowCode({ workflowInterceptorModules })`. Written under the system temporary directory.
+ */
+export function warrantWorkflowInterceptorModule(decisions: Record<string, ActivityDecision>): string;
+
 /** Shaped like `@temporalio/worker`'s WorkerPlugin, without depending on its types. */
 export interface WarrantWorkerPlugin {
   readonly name: "warrantai.WarrantPlugin";
-  configureWorker<T extends { interceptors?: { activity?: unknown[] } }>(options: T): T;
+  configureWorker<T extends { interceptors?: { activity?: unknown[]; workflowModules?: string[] } }>(options: T): T;
+  configureReplayWorker<T extends { interceptors?: { workflowModules?: string[] } }>(options: T): T;
 }
 
-/** A worker plugin for `Worker.create({ plugins: [plugin] })` that installs the activity interceptor. */
+/** A worker plugin for `Worker.create({ plugins: [plugin] })` that installs the activity interceptor and the workflow interceptor module. */
 export function warrantPlugin(client: Warrant, decisions: Record<string, ActivityDecision>, options?: TemporalAdapterOptions): WarrantWorkerPlugin;
 
 /** Report a model call made inside an activity, so its cost lands on that activity's decision. Throws outside an activity. */

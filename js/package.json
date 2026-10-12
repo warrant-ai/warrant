@@ -35,7 +35,7 @@
     "node": ">=18"
   },
   "scripts": {
-    "test": "node --test test/schema.test.js test/cli.test.js test/sdk.test.js test/emit.test.js test/sink.test.js test/policy.test.js test/adapter-temporal.test.js test/adr.test.js test/admissibility.test.js test/adr-l2.test.js",
+    "test": "node --test test/schema.test.js test/cli.test.js test/sdk.test.js test/emit.test.js test/sink.test.js test/policy.test.js test/sha256.test.js test/adapter-temporal.test.js test/adr.test.js test/admissibility.test.js test/adr-l2.test.js",
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
@@ -78,6 +78,7 @@
   "peerDependencies": {
     "@marcbachmann/cel-js": "^8.0.0",
     "@temporalio/activity": "^1.24.0",
+    "@temporalio/workflow": "^1.24.0",
     "yaml": "^2.4.0"
   },
   "peerDependenciesMeta": {
@@ -85,6 +86,9 @@
       "optional": true
     },
     "@temporalio/activity": {
+      "optional": true
+    },
+    "@temporalio/workflow": {
       "optional": true
     },
     "yaml": {
