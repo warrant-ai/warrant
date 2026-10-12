@@ -52,7 +52,8 @@ def test_sink_outage_spills_and_recovers(tmp_path, caplog):
 
     sink.fail = False
     deadline = time.monotonic() + 5
-    while time.monotonic() < deadline and len(sink.written) < 10:
+    # The worker writes to the sink, removes the spill file, then counts the recovery; wait for all three.
+    while time.monotonic() < deadline and em.stats()["recovered"] < 10:
         time.sleep(0.05)
     assert sorted(r["record_id"] for r in sink.written) == sorted(f"r{i}" for i in range(10))
     assert not list((tmp_path / "spill").glob("*.jsonl"))
