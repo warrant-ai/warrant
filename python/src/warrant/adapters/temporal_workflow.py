@@ -11,9 +11,8 @@ re-imported under the workflow sandbox.
     class LoanApproval:
         @workflow.run
         async def run(self, loan):
-            if workflow.patched("warrant-underwrite-decision"):           # new call sites go behind a patch
-                verdict = await warrant.decide("credit.approve", subject=loan.id, inputs={...},
-                                               action="approve", summary=result.reason)
+            verdict = await warrant.decide("credit.approve", subject=loan.id, inputs={...},
+                                           action="approve", summary=result.reason)
             try:
                 return await workflow.execute_activity(disburse, loan, start_to_close_timeout=...)
             except ActivityError as exc:
@@ -28,26 +27,30 @@ re-imported under the workflow sandbox.
 
 Everything here is deterministic: ids come from ``workflow.uuid4()`` and ``workflow.now()``, and
 records are written by the ``warrant.record`` local activity, whose result Temporal keeps in
-history so replay never writes twice. Adding a ``decide()`` call to a running workflow shifts the
-commands that follow it, so put new call sites behind ``workflow.patched``.
+history so replay never writes twice. Because ``decide()`` schedules a local activity, adding a call
+to a workflow type that already has open executions is a workflow change like any other: put it
+behind ``workflow.patched`` or use Worker Versioning. A workflow written with it needs neither.
 """
 
 from __future__ import annotations
 
 import contextvars
 from datetime import timedelta
-from typing import Any, Dict, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, FrozenSet, List, Mapping, Optional, Sequence
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError, ApplicationError
-from temporalio.worker import StartActivityInput, WorkflowInboundInterceptor, WorkflowOutboundInterceptor
+from temporalio.worker import StartActivityInput, StartLocalActivityInput, WorkflowInboundInterceptor, WorkflowOutboundInterceptor
 
+from warrant.adapters._core import MAX_EVIDENCE, as_evidence_content
+from warrant.hashing import content_hash
 from warrant.ids import ULID_RE, deterministic_ulid
 
 RECORD_ACTIVITY = "warrant.record"
 """Name of the local activity that writes workflow-side records; register ``WarrantInterceptor.record_activity``."""
 APPROVAL_HEADER = "warrant-approval"
+EVIDENCE_HEADER = "warrant-evidence"
 DENIED = "WarrantDenied"
 ESCALATED = "WarrantEscalated"
 UNREADABLE = "WarrantUnreadable"
@@ -176,19 +179,76 @@ async def rejected(record_id: str, *, reviewer: str, note: Optional[str] = None)
 
 
 class WarrantWorkflowInbound(WorkflowInboundInterceptor):
-    """Installed by ``WarrantInterceptor``; carries an approval from ``approved()`` to the activity as a header."""
+    """Installed by ``WarrantInterceptor``; carries the run's evidence and any approval to the decision activity as headers.
+
+    The evidence is kept in workflow state, not in worker memory, so a decision cites the results
+    of activities that ran on other workers, and a replay on any worker rebuilds it.
+    """
+
+    decisions: FrozenSet[str] = frozenset()
+    is_evidence: Callable[[str], bool] = staticmethod(lambda _activity_type: False)
+
+    @classmethod
+    def bound(cls, decisions: Sequence[str], is_evidence: Callable[[str], bool]) -> type:
+        """This class with the worker's decision activity types and evidence filter."""
+        return type(cls.__name__, (cls,), {"decisions": frozenset(decisions), "is_evidence": staticmethod(is_evidence)})
 
     def init(self, outbound: WorkflowOutboundInterceptor) -> None:
-        super().init(_Outbound(outbound))
+        super().init(_Outbound(outbound, self.decisions, self.is_evidence))
 
 
 class _Outbound(WorkflowOutboundInterceptor):
+    def __init__(self, next: WorkflowOutboundInterceptor, decisions: FrozenSet[str], is_evidence: Callable[[str], bool]) -> None:
+        super().__init__(next)
+        self._decisions = decisions
+        self._is_evidence = is_evidence
+        # Results of this run's evidence activities since the last decision, as hashes.
+        self._evidence: List[Dict[str, str]] = []
+        # The SDK's default activity id is this sequence number, shared by activities and local activities.
+        self._seq = 0
+
     def start_activity(self, input: StartActivityInput) -> Any:
         approval = _pending.get()
         if approval is not None:
             _pending.set(None)
             input.headers = {**input.headers, APPROVAL_HEADER: workflow.payload_converter().to_payload(approval)}
-        return self.next.start_activity(input)
+        return self._track(input, self.next.start_activity)
+
+    def start_local_activity(self, input: StartLocalActivityInput) -> Any:
+        return self._track(input, self.next.start_local_activity)
+
+    def _track(self, input: Any, start: Callable[[Any], Any]) -> Any:
+        self._seq += 1
+        activity_id = input.activity_id or str(self._seq)
+        if input.activity in self._decisions:
+            cited = list(self._evidence)
+            if cited:
+                input.headers = {**input.headers, EVIDENCE_HEADER: workflow.payload_converter().to_payload(cited)}
+            handle = start(input)
+            handle.add_done_callback(lambda done: self._consume(done, cited))
+        elif input.activity != RECORD_ACTIVITY and self._is_evidence(input.activity):
+            handle = start(input)
+            handle.add_done_callback(lambda done: self._add(done, input.activity, activity_id))
+        else:
+            handle = start(input)
+        return handle
+
+    def _add(self, done: Any, activity_type: str, activity_id: str) -> None:
+        if done.cancelled() or done.exception() is not None:
+            return
+        uri = f"tool://{activity_type}#{activity_id}"
+        self._evidence.append({"name": activity_type, "uri": uri, "content_hash": content_hash(as_evidence_content(done.result()))})
+        del self._evidence[:-MAX_EVIDENCE]
+
+    def _consume(self, done: Any, cited: List[Dict[str, str]]) -> None:
+        # A decision that ran or was withheld has cited the evidence. One that failed for any other
+        # reason leaves it for the next decision, as a failed attempt does for its retry.
+        if done.cancelled():
+            return
+        exc = done.exception()
+        if exc is not None and blocked(exc) is None:
+            return
+        self._evidence = [item for item in self._evidence if item not in cited]
 
 
 def _record_id(tag: str) -> str:
