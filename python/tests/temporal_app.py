@@ -60,6 +60,12 @@ async def disburse_opaque(loan: Loan, memo: str) -> str:
 
 
 @activity.defn
+async def disburse_down(loan: Loan) -> str:
+    """The decision when core banking is down on every attempt."""
+    raise RuntimeError("core banking unavailable")
+
+
+@activity.defn
 async def disburse_loan(loan: Loan) -> str:
     """The decision that may be escalated and then approved by a person."""
     return f"disbursed {loan.loan_id}"
@@ -84,6 +90,12 @@ class LoanWorkflow:
             return {"verdict": verdict}
         if mode == "approve":
             return await self._with_approval(loan)
+        if mode == "down":
+            try:
+                await workflow.execute_activity(disburse_down, loan, start_to_close_timeout=TIMEOUT, retry_policy=RETRY)
+            except ActivityError:
+                pass
+            return {"result": await workflow.execute_activity(disburse_loan, loan, start_to_close_timeout=TIMEOUT, retry_policy=RETRY)}
         try:
             if mode == "sync":
                 result = await workflow.execute_activity(disburse, args=[loan.loan_id, loan.amount, loan.bureau_score, loan.foir], start_to_close_timeout=TIMEOUT, retry_policy=RETRY)
@@ -131,3 +143,13 @@ class LoanWorkflowPatched(LoanWorkflow):
         if workflow.patched("warrant-second-decision"):
             out["second"] = await warrant.decide("credit.approve", subject=loan.loan_id, inputs={"amount": loan.amount, "bureau_score": loan.bureau_score, "foir": loan.foir}, action="confirm")
         return out
+
+
+@workflow.defn
+class SpreadLoanWorkflow:
+    """The evidence and the decision on different task queues, so on different workers."""
+
+    @workflow.run
+    async def run(self, loan: Loan) -> str:
+        await workflow.execute_activity(underwrite, loan, task_queue="lending-bureau", start_to_close_timeout=TIMEOUT, retry_policy=RETRY)
+        return await workflow.execute_activity(disburse_loan, loan, task_queue="lending-payments", start_to_close_timeout=TIMEOUT, retry_policy=RETRY)

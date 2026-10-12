@@ -11,6 +11,7 @@ pytest.importorskip("temporalio")
 from warrant import AgentInfo, SQLiteStore, Warrant, verify_records  # noqa: E402
 from warrant.adapters import AdapterError, ToolDecision  # noqa: E402
 from warrant.adapters.temporal import WarrantInterceptor, model_usage  # noqa: E402
+from warrant.hashing import content_hash  # noqa: E402
 from warrant.ids import deterministic_ulid  # noqa: E402
 
 POLICIES = Path(__file__).parent.parent.parent / "examples" / "policies"
@@ -46,11 +47,11 @@ def _run(guard, loan, mode, *, review=None, replay_with=None):
     from temporalio.testing import WorkflowEnvironment
     from temporalio.worker import Replayer, Worker
 
-    from temporal_app import Loan, LoanWorkflow, disburse, disburse_flaky, disburse_loan, disburse_opaque, underwrite
+    from temporal_app import Loan, LoanWorkflow, disburse, disburse_down, disburse_flaky, disburse_loan, disburse_opaque, underwrite
 
     async def go():
         async with await WorkflowEnvironment.start_time_skipping() as env:
-            activities = [underwrite, disburse, disburse_flaky, disburse_loan, disburse_opaque, guard.record_activity]
+            activities = [underwrite, disburse, disburse_down, disburse_flaky, disburse_loan, disburse_opaque, guard.record_activity]
             async with Worker(env.client, task_queue="lending-agents", workflows=[LoanWorkflow], activities=activities,
                               interceptors=[guard], activity_executor=concurrent.futures.ThreadPoolExecutor(2)):
                 handle = await env.client.start_workflow(LoanWorkflow.run, args=[Loan(**loan), mode], id=f"loan-{uuid.uuid4()}", task_queue="lending-agents")
@@ -82,6 +83,58 @@ def test_allowed_activity_runs_and_is_recorded_with_evidence_identity_and_cost(l
     assert decision["cost"] == {"amount": 1.6, "currency": "INR", "cost_centre": "retail-lending",
                                 "breakdown": [{"kind": "model_call", "provider": "anthropic", "model": "claude-sonnet-5", "tokens_in": 1200, "tokens_out": 80, "amount": 1.6}]}
     assert all(r.ok for r in verify_records([decision]))
+
+
+def _spread(w, *, workflow_guarded=True):
+    """Three workers, each with its own guard, as three processes would have: the workflow on one,
+    the evidence activity on a second, the decision on a third. Replays the run afterwards."""
+    from temporalio.testing import WorkflowEnvironment
+    from temporalio.worker import Replayer, Worker
+
+    from temporal_app import Loan, SpreadLoanWorkflow, disburse_loan, underwrite
+
+    guards = [WarrantInterceptor(w, {"disburse_loan": DISBURSE}) for _ in range(3)]
+    flow = dict(activities=[guards[0].record_activity], interceptors=[guards[0]]) if workflow_guarded else {}
+
+    async def go():
+        async with await WorkflowEnvironment.start_time_skipping() as env:
+            async with Worker(env.client, task_queue="lending-flow", workflows=[SpreadLoanWorkflow], **flow), \
+                    Worker(env.client, task_queue="lending-bureau", activities=[underwrite], interceptors=[guards[1]]), \
+                    Worker(env.client, task_queue="lending-payments", activities=[disburse_loan], interceptors=[guards[2]]):
+                handle = await env.client.start_workflow(SpreadLoanWorkflow.run, Loan(**GOOD), id=f"loan-{uuid.uuid4()}", task_queue="lending-flow")
+                out = await handle.result()
+                await Replayer(workflows=[SpreadLoanWorkflow], interceptors=[WarrantInterceptor(w, {"disburse_loan": DISBURSE})]).replay_workflow(await handle.fetch_history())
+                return out
+
+    return asyncio.run(go())
+
+
+def test_evidence_reaches_a_decision_that_runs_on_another_worker(ledger):
+    w, records = ledger
+    assert _spread(w) == "disbursed LN-1"
+    (decision,) = records()
+    assert [e["name"] for e in decision["evidence"]] == ["temporal.execution", "underwrite", "disburse_loan.result"]
+    underwrite_item = decision["evidence"][1]
+    assert underwrite_item["uri"] == "tool://underwrite#1"
+    assert underwrite_item["content_hash"] == content_hash({"loan_id": "LN-1", "band": "A"})
+    assert all(r.ok for r in verify_records([decision]))
+
+
+def test_without_the_interceptor_on_the_workflow_worker_a_decision_cites_no_evidence(ledger):
+    w, records = ledger
+    assert _spread(w, workflow_guarded=False) == "disbursed LN-1"
+    (decision,) = records()
+    assert [e["name"] for e in decision["evidence"]] == ["temporal.execution", "disburse_loan.result"]
+
+
+def test_a_decision_that_fails_outright_leaves_the_evidence_for_the_next(ledger):
+    w, records = ledger
+    out = _run(WarrantInterceptor(w, {"disburse_down": DISBURSE, "disburse_loan": DISBURSE}), GOOD, "down")
+    assert out == {"result": "disbursed LN-1"}
+    failed = [r for r in records() if r["decision"]["status"] == "failed"]
+    (acted,) = [r for r in records() if r["decision"]["status"] == "acted"]
+    assert len(failed) == 3 and all([e["name"] for e in r["evidence"]] == ["temporal.execution", "underwrite"] for r in failed)
+    assert [e["name"] for e in acted["evidence"]] == ["temporal.execution", "underwrite", "disburse_loan.result"]
 
 
 def test_deny_and_escalate_withhold_and_fail_the_activity_without_retry(ledger):
@@ -159,8 +212,6 @@ def test_constructor_and_usage_helper_reject_misuse(ledger):
     w, _ = ledger
     with pytest.raises(ValueError, match="decisions is empty"):
         WarrantInterceptor(w, {})
-    with pytest.raises(ValueError, match="max_runs"):
-        WarrantInterceptor(w, {"disburse": DISBURSE}, max_runs=0)
     with pytest.raises(RuntimeError, match="inside a Temporal activity"):
         model_usage("anthropic", "claude-sonnet-5")
     with pytest.raises(ValueError, match="26-character ULID"):

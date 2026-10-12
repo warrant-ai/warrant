@@ -18,8 +18,11 @@ against the policy. ``deny`` and ``escalate`` stop it: the attempt is recorded a
 the activity fails with a non-retryable ``ApplicationError`` of type ``WarrantDenied`` or
 ``WarrantEscalated``, which the workflow can catch and route to a person. ``allow`` and
 ``unchecked`` change nothing. After the activity returns, the decision is recorded with the
-run's other activity results attached as evidence, by hash, and with the Temporal identity
+run's earlier activity results attached as evidence, by hash, and with the Temporal identity
 (namespace, workflow, run, activity, attempt) as evidence, so an auditor can open the run.
+The workflow interceptor keeps those hashes in workflow state and passes them to the decision
+activity in a header, so they reach it on whichever worker it runs: put the interceptor (or the
+plugin) on every worker that runs the workflow or its activities.
 An activity that raises is recorded as a failed decision, without its error text.
 
 One record per attempt, with a record id derived from the attempt's Temporal identity, so a
@@ -39,7 +42,7 @@ import inspect
 import logging
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
-from warrant.adapters._core import AdapterError, EvidenceItem, EvidenceLog, ModelUsage, Pricer, ToolDecision, blocked_message, evaluate, record
+from warrant.adapters._core import AdapterError, EvidenceItem, ModelUsage, Pricer, ToolDecision, blocked_message, evaluate, record
 from warrant.client import Warrant
 from warrant.hashing import content_hash
 from warrant.ids import ULID_RE, deterministic_ulid
@@ -54,7 +57,7 @@ except ImportError as exc:  # pragma: no cover
     raise ImportError('the Temporal adapter needs temporalio: pip install "warrantai[temporal]"') from exc
 
 from warrant.adapters import temporal_workflow as _wf
-from warrant.adapters.temporal_workflow import APPROVAL_HEADER, DENIED, ESCALATED, RECORD_ACTIVITY, UNREADABLE
+from warrant.adapters.temporal_workflow import APPROVAL_HEADER, DENIED, ESCALATED, EVIDENCE_HEADER, RECORD_ACTIVITY, UNREADABLE
 
 log = logging.getLogger("warrant.adapters.temporal")
 
@@ -95,7 +98,6 @@ class WarrantInterceptor(Interceptor):
         *,
         evidence: Callable[[str], bool] = _every_activity,
         pricer: Optional[Pricer] = None,
-        max_runs: int = 1000,
         workflow_only: bool = False,
     ) -> None:
         if not decisions and not workflow_only:
@@ -106,37 +108,29 @@ class WarrantInterceptor(Interceptor):
             )
         if decisions and workflow_only:
             raise ValueError("workflow_only=True gates nothing, so decisions must be empty")
-        if max_runs < 1:
-            raise ValueError("max_runs must be at least 1")
         self._client = client
         self._decisions = dict(decisions)
         self._is_evidence = (lambda _activity_type: False) if workflow_only else evidence
         self._pricer = pricer
-        # Evidence is kept per workflow run; a run can end without a decision and nothing tells
-        # the worker, so the log forgets the oldest runs past max_runs.
-        self._evidence = EvidenceLog(max_sessions=max_runs)
 
     def intercept_activity(self, next: ActivityInboundInterceptor) -> ActivityInboundInterceptor:
         return _Inbound(next, self)
 
     def workflow_interceptor_class(self, input: WorkflowInterceptorClassInput) -> Optional[type[WorkflowInboundInterceptor]]:
-        return _wf.WarrantWorkflowInbound
+        return _wf.WarrantWorkflowInbound.bound(self._decisions, self._is_evidence)
 
     # -- one activity attempt ------------------------------------------------
 
     async def _execute(self, next: ActivityInboundInterceptor, input: ExecuteActivityInput) -> Any:
         info = activity.info()
-        run_key = f"{info.workflow_id}/{info.workflow_run_id}"
         mapping = self._decisions.get(info.activity_type)
         if mapping is None:
-            result = await next.execute_activity(input)
-            if self._is_evidence(info.activity_type):
-                self._evidence.add(run_key, info.activity_type, info.activity_id, result)
-            return result
+            return await next.execute_activity(input)
 
         try:
             subject, inputs = mapping.read(info.activity_type, _arguments(input.fn, input.args))
             approval = _approval(input.headers)
+            evidence = _evidence(input.headers)
         except AdapterError as exc:
             log.warning("warrant: %s blocked, not a decision: %s", info.activity_type, exc)
             raise ApplicationError(f"Warrant could not read the decision from this call: {exc}", type=UNREADABLE, non_retryable=True) from None
@@ -148,7 +142,7 @@ class WarrantInterceptor(Interceptor):
         verdict = evaluate(self._client, mapping.decision_class, inputs)
         if verdict.result == "deny" or (verdict.result == "escalate" and approval is None):
             note = "awaiting a human's decision; the activity was not run" if verdict.result == "escalate" else None
-            self._record(mapping, info, subject, inputs, status="withheld", record_id=record_id, identity=identity, evidence=self._evidence.take(run_key), human_note=note)
+            self._record(mapping, info, subject, inputs, status="withheld", record_id=record_id, identity=identity, evidence=evidence, human_note=note)
             raise ApplicationError(
                 blocked_message(info.activity_type, verdict),
                 {"record_id": record_id, "decision_class": mapping.decision_class, "subject": subject, "result": verdict.result,
@@ -170,12 +164,12 @@ class WarrantInterceptor(Interceptor):
         try:
             result = await next.execute_activity(input)
         except BaseException:
-            # A failed attempt keeps the run's evidence for the next attempt. The error text is not recorded: it can carry customer data.
-            self._record(mapping, info, subject, inputs, status="failed", record_id=record_id, identity=identity, evidence=self._evidence.peek(run_key), usage=usage, **human)
+            # The error text is not recorded: it can carry customer data.
+            self._record(mapping, info, subject, inputs, status="failed", record_id=record_id, identity=identity, evidence=evidence, usage=usage, **human)
             raise
         finally:
             _usage.reset(token)
-        self._record(mapping, info, subject, inputs, status="acted", record_id=record_id, identity=identity, evidence=self._evidence.take(run_key), result=result, usage=usage, **human)
+        self._record(mapping, info, subject, inputs, status="acted", record_id=record_id, identity=identity, evidence=evidence, result=result, usage=usage, **human)
         return result
 
     def _record(
@@ -335,6 +329,18 @@ def _approval(headers: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
     if not isinstance(reviewer, str) or not reviewer or not isinstance(record_id, str) or not ULID_RE.match(record_id):
         raise AdapterError("the approval header needs a reviewer and the escalated decision's record id")
     return {"reviewer": reviewer, "record_id": record_id, "note": approval.get("note") if isinstance(approval.get("note"), str) else None}
+
+
+def _evidence(headers: Mapping[str, Any]) -> List[EvidenceItem]:
+    """The run's evidence the workflow interceptor attached, or none when the workflow's worker has no interceptor."""
+    payload = headers.get(EVIDENCE_HEADER) if headers else None
+    if payload is None:
+        return []
+    try:
+        items = activity.payload_converter().from_payload(payload, list)
+        return [EvidenceItem(item["name"], item["uri"], item["content_hash"]) for item in items]
+    except Exception as exc:
+        raise AdapterError(f"the evidence header could not be decoded: {type(exc).__name__}") from exc
 
 
 def _identity(info: "activity.Info") -> EvidenceItem:
