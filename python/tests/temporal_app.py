@@ -181,3 +181,16 @@ class BackoffLoanWorkflow:
         named = await workflow.execute_activity(whoami, loan, activity_id="bureau-check", start_to_close_timeout=TIMEOUT, retry_policy=RETRY)
         result = await workflow.execute_activity(disburse_loan, loan, start_to_close_timeout=TIMEOUT, retry_policy=RETRY)
         return {"ids": [looked_up, checked, named], "result": result}
+
+
+@workflow.defn
+class RetriedTaskWorkflow:
+    """Records a workflow-side decision, then fails its first workflow task, as a worker crash or an unhandled
+    command would. The retried task runs the record local activity again, since its result reached no history."""
+
+    @workflow.run
+    async def run(self, loan: Loan) -> Dict[str, Any]:
+        verdict = await warrant.decide("credit.approve", subject=loan.loan_id, inputs={"amount": loan.amount, "bureau_score": loan.bureau_score, "foir": loan.foir}, action="approve")
+        if workflow.info().get_current_history_length() <= 3:
+            raise RuntimeError("fail the first workflow task")
+        return verdict

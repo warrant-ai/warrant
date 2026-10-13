@@ -51,6 +51,21 @@ jobs:
           node-version: 22
       - run: pip install -e "python[sign]"
       - run: python scripts/differential.py --count 20000
+  temporal-cross-language:
+    # A JS workflow approves an escalated activity a Python worker runs: the approval header across the two SDKs.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: pip install -e "python[temporal,policy]" pytest
+      - run: npm ci
+        working-directory: js
+      - run: pytest python/tests/test_temporal_cross_language.py -v
   action:
     # Runs the replay action the way a user's workflow would, against the lending gallery.
     runs-on: ubuntu-latest

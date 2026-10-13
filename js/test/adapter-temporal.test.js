@@ -316,3 +316,185 @@ test("the plugin keeps interceptors the worker already has and never adds its ow
   assert.deepEqual(plugin.configureReplayWorker({ interceptors: {} }).interceptors.workflowModules, [once.interceptors.workflowModules[1]]);
   await w.close();
 });
+
+const HELPERS = fileURLToPath(new URL("./temporal-workflows-helpers.js", import.meta.url));
+
+/**
+ * Run `helperWorkflow` once with the plugin on the worker. `review` is sent as the `review` Update;
+ * `replayWith` replays the finished history against that workflows file and returns its error, if any.
+ */
+async function runHelpers(loan, mode, { review, replayWith, workflowType = "helperWorkflow", args, history = false } = {}) {
+  const { TestWorkflowEnvironment, Worker, activity, adapter } = await load();
+  const { w, records } = await ledger();
+  const plugin = () => adapter.warrantPlugin(w, { disburse: DISBURSE(adapter) });
+  const env = await TestWorkflowEnvironment.createTimeSkipping();
+  try {
+    const worker = await Worker.create({
+      connection: env.nativeConnection, taskQueue: "lending-helpers", workflowsPath: HELPERS,
+      activities: activities(adapter.modelUsage, activity.Context), plugins: [plugin()],
+    });
+    const workflowId = `loan-${Date.now()}-${Math.random()}`;
+    let out = await worker.runUntil(async () => {
+      const handle = await env.client.workflow.start(workflowType, { args: args ?? [loan, mode], taskQueue: "lending-helpers", workflowId });
+      if (review !== undefined) assert.equal(await handle.executeUpdate("review", { args: [review] }), "noted");
+      return handle.result();
+    });
+    if (history) {
+      const { events } = await env.client.workflow.getHandle(workflowId).fetchHistory();
+      out = { result: out, failedTasks: events.filter((e) => e.workflowTaskFailedEventAttributes).length };
+    }
+    let replayError = null;
+    if (replayWith) {
+      const history = await env.client.workflow.getHandle(workflowId).fetchHistory();
+      try {
+        await Worker.runReplayHistory({ workflowsPath: replayWith, plugins: [plugin()] }, history, workflowId);
+      } catch (err) {
+        replayError = err;
+      }
+    }
+    return { out, records: await records(), w, replayError };
+  } finally {
+    await env.teardown();
+  }
+}
+
+test("a workflow-side decision is recorded through the local activity, and an upgrade behind patched() replays", { skip }, async () => {
+  const { out, records, w, replayError } = await runHelpers(GOOD, "wf", { replayWith: fileURLToPath(new URL("./temporal-workflows-upgrade.js", import.meta.url)) });
+  assert.equal(replayError, null);
+  const { verdict } = out;
+  assert.deepEqual([verdict.result, verdict.clause, verdict.status, verdict.flagged], ["allow", "4.2", "acted", false]);
+  assert.equal(out.second, undefined);
+  assert.equal(records.length, 1, "the replay wrote nothing");
+  const [decision] = records;
+  validate(decision);
+  assert.equal(decision.record_id, verdict.record_id);
+  assert.deepEqual(decision.decision, { class: "credit.approve", action: "approve", subject: "LN-1", status: "acted", summary: "workflow-side decision", alternatives: ["refer", "decline"] });
+  assert.deepEqual(decision.evidence.map((e) => e.name), ["temporal.execution"]);
+  assert.match(decision.evidence[0].uri, /^temporal:\/\/default\/loan-[^/]+\/[^/]+$/);
+  await w.close();
+});
+
+test("the same upgrade without patched() fails replay, which is why patched() is needed for open executions", { skip }, async () => {
+  const { replayError, w } = await runHelpers(GOOD, "wf", { replayWith: fileURLToPath(new URL("./temporal-workflows-unguarded.js", import.meta.url)) });
+  assert.ok(replayError, "replay of the unguarded upgrade should fail");
+  assert.match(`${replayError.name} ${replayError.message} ${replayError.cause?.message ?? ""}`, /[Dd]eterminism|[Nn]ondeterminism/);
+  await w.close();
+});
+
+test("a retried workflow task records a workflow-side decision once", { skip }, async () => {
+  const { out, records, w } = await runHelpers(GOOD, "", { workflowType: "retriedTaskWorkflow", args: [GOOD], history: true });
+  assert.equal(out.failedTasks, 1, "the first workflow task failed and was retried");
+  assert.equal(records.length, 2, "the record activity ran on both attempts");
+  assert.deepEqual(records.map((r) => r.record_id), [out.result.record_id, out.result.record_id], "with the same record id, so the store keeps one");
+  await w.close();
+});
+
+test("a workflow-side deny is withheld and the workflow branches on it", { skip }, async () => {
+  const { out, records, w } = await runHelpers(WEAK, "wf");
+  assert.deepEqual([out.verdict.result, out.verdict.status, out.verdict.clause], ["deny", "withheld", "4.1"]);
+  const [decision] = records;
+  assert.deepEqual([decision.decision.status, decision.decision.action], ["withheld", "none"]);
+  await w.close();
+});
+
+test("an escalation approved by a person runs the activity and links the verdict", { skip }, async () => {
+  const { out, records, w } = await runHelpers(BIG, "approve", { review: { approve: true, reviewer: "asha@bank.example", note: "DSCR checked" } });
+  assert.equal(out.result, "disbursed LN-2");
+  for (const r of records) validate(r);
+  const decisions = records.filter((r) => r.record_type === "decision");
+  const [verdict] = records.filter((r) => r.record_type === "human_verdict");
+  const withheld = decisions.find((r) => r.decision.status === "withheld");
+  const acted = decisions.find((r) => r.decision.status === "acted");
+  assert.equal(decisions.length, 2);
+  assert.equal(withheld.record_id, out.escalated);
+  assert.equal(withheld.human.required, true);
+  assert.deepEqual(verdict.references, { decision_record_id: withheld.record_id });
+  assert.deepEqual([verdict.human.reviewer, verdict.human.verdict, verdict.human.note], ["asha@bank.example", "approve", "DSCR checked"]);
+  assert.equal(acted.mandate.result, "escalate");
+  assert.deepEqual(acted.human, { required: true, reviewer: "asha@bank.example", note: `approved after escalation ${withheld.record_id}` });
+  assert.deepEqual(withheld.evidence.map((e) => e.name), ["temporal.execution", "underwrite"], "the escalation took the run's evidence");
+  assert.deepEqual(acted.evidence.map((e) => e.name), ["temporal.execution", "warrant.escalation", "disburse.result", "anthropic/claude-sonnet-5"]);
+  assert.equal(acted.evidence[1].uri, `warrant://record/${withheld.record_id}`);
+  assert.equal(acted.evidence[1].content_hash, contentHash(withheld.record_id), "the same item the Python adapter writes");
+  assert.ok(records.indexOf(verdict) < records.indexOf(acted), "the verdict is written before the activity runs");
+  await w.close();
+});
+
+test("an escalation rejected by a person, or timed out, records the verdict and runs nothing", { skip }, async () => {
+  const rejected = await runHelpers(BIG, "approve", { review: { approve: false, reviewer: "asha@bank.example", note: "income unverified" } });
+  const timedOut = await runHelpers({ ...BIG, loan_id: "LN-4" }, "approve");
+  assert.equal(rejected.out.verdict.verdict, "reject");
+  assert.equal(timedOut.out.timed_out, true);
+  for (const { records, out } of [rejected, timedOut]) {
+    assert.deepEqual(records.map((r) => r.record_type).sort(), ["decision", "human_verdict"], "no acted record: nothing ran");
+    const verdict = records.find((r) => r.record_type === "human_verdict");
+    assert.equal(verdict.references.decision_record_id, out.escalated);
+    assert.equal(verdict.record_id, out.verdict.record_id);
+  }
+  assert.deepEqual(
+    [rejected, timedOut].map(({ records }) => records.find((r) => r.record_type === "human_verdict").human).map((h) => [h.reviewer, h.verdict, h.note]),
+    [["asha@bank.example", "reject", "income unverified"], ["system", "reject", "timed out"]],
+  );
+  await rejected.w.close();
+  await timedOut.w.close();
+});
+
+test("approved() refuses to run when the workflow's worker has no Warrant interceptor module", { skip }, async () => {
+  const { TestWorkflowEnvironment, Worker, activity, adapter } = await load();
+  const { w, records } = await ledger();
+  const env = await TestWorkflowEnvironment.createTimeSkipping();
+  try {
+    const worker = await Worker.create({
+      connection: env.nativeConnection, taskQueue: "lending-unattached", workflowsPath: HELPERS,
+      activities: activities(adapter.modelUsage, activity.Context), interceptors: { activity: [adapter.warrantActivityInterceptor(w, { disburse: DISBURSE(adapter) })] },
+    });
+    const out = await worker.runUntil(env.client.workflow.execute("unattachedApprovalWorkflow", { args: [BIG, "01K58FEB00G9AC6AD9518FDN9S"], taskQueue: "lending-unattached", workflowId: `loan-${Date.now()}` }));
+    assert.equal(out.attached, false);
+    assert.match(out.message, /approval was not attached to the activity/);
+    const written = await records();
+    assert.ok(written.every((r) => r.record_type !== "human_verdict"), "no verdict for an approval that went nowhere");
+    assert.ok(written.every((r) => r.decision?.status !== "acted"), "the activity did not run unapproved");
+  } finally {
+    await env.teardown();
+    await w.close();
+  }
+});
+
+test("a denial is not an escalation", async () => {
+  const { ApplicationFailure } = await import("@temporalio/workflow");
+  const { blocked, escalation } = await import("../src/adapters/temporal-workflow.js");
+  const denied = ApplicationFailure.create({ message: "no", type: "WarrantDenied", nonRetryable: true, details: [{ record_id: "X", result: "deny" }] });
+  assert.deepEqual(blocked(denied), { record_id: "X", result: "deny" });
+  assert.equal(escalation(denied), null);
+  assert.equal(blocked(new Error("other")), null);
+});
+
+test("the workflow helpers refuse bad arguments before scheduling anything", async () => {
+  const wf = await import("../src/adapters/temporal-workflow.js");
+  await assert.rejects(wf.decide("credit.approve", { subject: "", inputs: {}, action: "approve" }), /subject must be a non-empty string/);
+  await assert.rejects(wf.decide("credit.approve", { subject: "LN-1", inputs: [], action: "approve" }), /inputs must be an object/);
+  await assert.rejects(wf.approved("disburse", [], { reviewer: "", recordId: "01K58FEB00G9AC6AD9518FDN9S" }), /reviewer must be a non-empty string/);
+  await assert.rejects(wf.approved("disburse", [], { reviewer: "a", recordId: "not-a-ulid" }), /recordId must be the escalated decision's record id/);
+  await assert.rejects(wf.approved("disburse", { loan_id: "LN-1" }, { reviewer: "a", recordId: "01K58FEB00G9AC6AD9518FDN9S" }), /args must be the activity's arguments/);
+  await assert.rejects(wf.verdict("01K58FEB00G9AC6AD9518FDN9S", { reviewer: "a", verdict: "maybe" }), /verdict must be approve, reject or amend/);
+});
+
+test("the record activity writes decisions and verdicts, and refuses a malformed request as unreadable", async () => {
+  const { adapter } = await load();
+  const { w, records } = await ledger();
+  const record = adapter.warrantRecordActivity(w);
+  const identity = { namespace: "default", workflow_type: "t", workflow_id: "wf-1", workflow_run_id: "run-1", first_execution_run_id: "run-1", task_queue: "q", attempt: 1 };
+  const decided = await record({ kind: "decision", record_id: deterministicUlid(1758000000000, "a"), decision_class: "credit.approve", subject: "LN-2",
+    inputs: { amount: 900000, bureau_score: 790, foir: 0.3 }, action: "approve", summary: null, alternatives: null, on_behalf_of: null, identity });
+  assert.deepEqual([decided.status, decided.result, decided.policy_id], ["withheld", "escalate", "CR-07"]);
+  const verdict = await record({ kind: "verdict", record_id: deterministicUlid(1758000000000, "b"), decision_record_id: decided.record_id, reviewer: "asha@bank.example", verdict: "approve", note: null });
+  assert.equal(verdict.verdict, "approve");
+  const [decision, linked] = await records();
+  assert.deepEqual(decision.human, { required: true, note: "awaiting a human's decision" });
+  assert.equal(decision.evidence[0].uri, "temporal://default/wf-1/run-1");
+  assert.equal(linked.references.decision_record_id, decided.record_id);
+  await assert.rejects(record({ kind: "decision", record_id: "x", decision_class: "c", subject: "s", inputs: [], action: "a" }), (err) => err.type === "WarrantUnreadable");
+  await assert.rejects(record({ kind: "verdict", record_id: "x", decision_record_id: "y", reviewer: "a", verdict: "maybe" }), (err) => err.type === "WarrantUnreadable");
+  await assert.rejects(record({ kind: "other" }), (err) => err.type === "WarrantUnreadable" && /unknown request kind/.test(err.message));
+  await w.close();
+});

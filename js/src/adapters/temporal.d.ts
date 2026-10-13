@@ -5,6 +5,10 @@ export const ESCALATED: "WarrantEscalated";
 export const UNREADABLE: "WarrantUnreadable";
 /** The header the workflow interceptor carries the run's evidence in, shared with the Python adapter. */
 export const EVIDENCE_HEADER: "warrant-evidence";
+/** The header `approved()` carries a reviewer's approval in, shared with the Python adapter. */
+export const APPROVAL_HEADER: "warrant-approval";
+/** The activity the workflow-side helpers write records through, as a local activity. */
+export const RECORD_ACTIVITY: "warrant.record";
 
 /** The activity's single object argument, or `{ args }` for any other call shape. */
 export type ActivityArguments = Record<string, unknown>;
@@ -57,12 +61,15 @@ export function warrantWorkflowInterceptorModule(decisions: Record<string, Activ
 /** Shaped like `@temporalio/worker`'s WorkerPlugin, without depending on its types. */
 export interface WarrantWorkerPlugin {
   readonly name: "warrantai.WarrantPlugin";
-  configureWorker<T extends { interceptors?: { activity?: unknown[]; workflowModules?: string[] } }>(options: T): T;
+  configureWorker<T extends { activities?: object; interceptors?: { activity?: unknown[]; workflowModules?: string[] } }>(options: T): T;
   configureReplayWorker<T extends { interceptors?: { workflowModules?: string[] } }>(options: T): T;
 }
 
-/** A worker plugin for `Worker.create({ plugins: [plugin] })` that installs the activity interceptor and the workflow interceptor module. */
+/** A worker plugin for `Worker.create({ plugins: [plugin] })` that installs the activity interceptor, the workflow interceptor module and the `warrant.record` activity. */
 export function warrantPlugin(client: Warrant, decisions: Record<string, ActivityDecision>, options?: TemporalAdapterOptions): WarrantWorkerPlugin;
 
 /** Report a model call made inside an activity, so its cost lands on that activity's decision. Throws outside an activity. */
 export function modelUsage(provider: string, model: string, options?: { tokensIn?: number; tokensOut?: number }): void;
+
+/** The `warrant.record` activity the workflow-side helpers write through. `warrantPlugin()` registers it; without the plugin, register it under `RECORD_ACTIVITY`. */
+export function warrantRecordActivity(client: Warrant): (request: Record<string, unknown>) => Promise<Record<string, unknown>>;

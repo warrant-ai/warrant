@@ -18,6 +18,10 @@
       "types": "./src/adapters/temporal.d.ts",
       "default": "./src/adapters/temporal.js"
     },
+    "./adapters/temporal/workflow": {
+      "types": "./src/adapters/temporal-workflow.d.ts",
+      "default": "./src/adapters/temporal-workflow.js"
+    },
     "./schema": "./schema/decision-record.v0.json",
     "./package.json": "./package.json"
   },

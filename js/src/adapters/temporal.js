@@ -14,7 +14,7 @@
  * `interceptors: { activity: [warrantActivityInterceptor(...)], workflowModules: [warrantWorkflowInterceptorModule(decisions)] }`.
  * Put the plugin on every worker: the ones that run the workflow and the ones that run its activities.
  *
- * Workflow code does not change. Before a mapped activity runs, its arguments are checked
+ * Gating and recording need no change to workflow code. Before a mapped activity runs, its arguments are checked
  * against the policy. `deny` and `escalate` stop it: the attempt is recorded as withheld and the
  * activity fails with a non-retryable ApplicationFailure of type `WarrantDenied` or
  * `WarrantEscalated`, which the workflow can catch and route to a person. `allow` and
@@ -23,7 +23,10 @@
  * (namespace, workflow, run, activity, attempt) as evidence. The workflow interceptor keeps those
  * hashes in workflow state and passes them in the `warrant-evidence` header, so they reach the
  * decision on whichever worker runs it. An activity that throws is recorded as a failed decision,
- * without its error text.
+ * without its error text. An escalated activity that workflow code runs again through `approved()`
+ * (`warrantai/adapters/temporal/workflow`) carries the approval in the `warrant-approval` header:
+ * the reviewer's verdict is written as its own record, linked to the escalated decision, before the
+ * activity runs, and the activity's record names the reviewer. A denial cannot be approved.
  *
  * The arguments a mapping reads are the activity's single object argument, the usual Temporal
  * shape; any other shape is presented as `{ args }`, for mapping functions to read.
@@ -42,10 +45,10 @@ import { ApplicationFailure, Context } from "@temporalio/activity";
 
 import { Verdict } from "../client.js";
 import { contentHash, sha256Hex } from "../hashing.js";
-import { deterministicUlid } from "../ids.js";
-import { DENIED, ESCALATED, EVIDENCE_HEADER, MAX_EVIDENCE, UNREADABLE, asEvidenceContent } from "./temporal-shared.js";
+import { ULID_RE, deterministicUlid } from "../ids.js";
+import { APPROVAL_HEADER, DENIED, ESCALATED, EVIDENCE_HEADER, MAX_EVIDENCE, RECORD_ACTIVITY, UNREADABLE, asEvidenceContent } from "./temporal-shared.js";
 
-export { DENIED, ESCALATED, EVIDENCE_HEADER, UNREADABLE };
+export { APPROVAL_HEADER, DENIED, ESCALATED, EVIDENCE_HEADER, RECORD_ACTIVITY, UNREADABLE };
 
 const WORKFLOW_MODULE = fileURLToPath(new URL("./temporal-workflow.js", import.meta.url));
 const usage = new AsyncLocalStorage();
@@ -139,13 +142,15 @@ export function warrantWorkflowInterceptorModule(decisions) {
 
 /**
  * A worker plugin for `Worker.create({ plugins: [...] })` and replay workers: adds the activity
- * interceptor built by `warrantActivityInterceptor(client, decisions, options)` and the workflow
- * interceptor module from `warrantWorkflowInterceptorModule(decisions)`. Named
+ * interceptor built by `warrantActivityInterceptor(client, decisions, options)`, the workflow
+ * interceptor module from `warrantWorkflowInterceptorModule(decisions)`, and the `warrant.record`
+ * activity from `warrantRecordActivity(client)` that the workflow-side helpers write through. Named
  * `warrantai.WarrantPlugin` in the worker's logs. Neither is added twice. A worker given a prebuilt
  * `workflowBundle` ignores `workflowModules`: pass the module to `bundleWorkflowCode` instead.
  */
 export function warrantPlugin(client, decisions, options = {}) {
   const factory = warrantActivityInterceptor(client, decisions, options);
+  const recordActivity = warrantRecordActivity(client);
   let workflowModule;
   const withInterceptors = (workerOptions) => {
     workflowModule ??= warrantWorkflowInterceptorModule(decisions);
@@ -153,7 +158,9 @@ export function warrantPlugin(client, decisions, options = {}) {
     if (!activity.includes(factory)) activity.push(factory);
     const workflowModules = [...(workerOptions.interceptors?.workflowModules ?? [])];
     if (!workflowModules.includes(workflowModule)) workflowModules.push(workflowModule);
-    return { ...workerOptions, interceptors: { ...workerOptions.interceptors, activity, workflowModules } };
+    // The local activity the workflow-side helpers write through; one the worker already registers is kept.
+    const activities = { [RECORD_ACTIVITY]: recordActivity, ...workerOptions.activities };
+    return { ...workerOptions, activities, interceptors: { ...workerOptions.interceptors, activity, workflowModules } };
   };
   return {
     name: "warrantai.WarrantPlugin",
@@ -175,9 +182,11 @@ async function run(client, decisions, isEvidence, pricer, input, next) {
 
   let read;
   let cited;
+  let approval;
   try {
     read = mapping.read(info.activityType, callObject(input.args));
     cited = evidenceFrom(input.headers).filter((item) => isEvidence(item.name));
+    approval = approvalFrom(input.headers);
   } catch (err) {
     if (!(err instanceof AdapterError)) throw err;
     client._log?.warn?.(`warrant: ${info.activityType} blocked, not a decision: ${err.message}`);
@@ -186,15 +195,24 @@ async function run(client, decisions, isEvidence, pricer, input, next) {
   const { subject, inputs } = read;
   const key = `${info.workflowNamespace ?? ""}|${wf.workflowId}|${wf.runId}|${info.activityId}|${info.attempt}`;
   const recordId = deterministicUlid(info.currentAttemptScheduledTimestampMs, key);
-  const identity = identityEvidence(info, wf);
+  const identity = [identityEvidence(info, wf)];
   const verdict = client.policy ? client.policy.evaluate(mapping.decisionClass, inputs) : new Verdict("unchecked", { reason: "no policy engine configured" });
-  if (verdict.result === "deny" || verdict.result === "escalate") {
+  if (verdict.result === "deny" || (verdict.result === "escalate" && approval === null)) {
     const note = verdict.result === "escalate" ? "awaiting a human's decision; the activity was not run" : undefined;
-    await record(client, mapping, info.activityType, subject, inputs, { status: "withheld", recordId, evidence: [identity, ...cited], humanNote: note, pricer });
+    await record(client, mapping, info.activityType, subject, inputs, { status: "withheld", recordId, evidence: [...identity, ...cited], humanNote: note, pricer });
     throw ApplicationFailure.nonRetryable(blockedMessage(info.activityType, verdict), verdict.result === "escalate" ? ESCALATED : DENIED, {
       record_id: recordId, decision_class: mapping.decisionClass, subject, result: verdict.result,
       policy_id: verdict.policyId ?? null, clause: verdict.clause ?? null, reason: verdict.reason ?? null,
     });
+  }
+
+  let human = {};
+  if (approval !== null) {
+    // The reviewer's verdict is its own sealed record, linked to the escalated decision, written before the activity runs.
+    client.humanVerdict({ reviewer: approval.reviewer, verdict: "approve", decisionRecordId: approval.record_id, note: approval.note ?? undefined,
+      recordId: deterministicUlid(info.currentAttemptScheduledTimestampMs, `${key}|verdict`) });
+    identity.push({ name: "warrant.escalation", uri: `warrant://record/${approval.record_id}`, type: "other", contentHash: contentHash(approval.record_id) });
+    human = { humanReviewer: approval.reviewer, humanNote: `approved after escalation ${approval.record_id}` };
   }
 
   const used = [];
@@ -203,14 +221,14 @@ async function run(client, decisions, isEvidence, pricer, input, next) {
     result = await usage.run(used, () => next(input));
   } catch (err) {
     // The error text is not recorded: it can carry customer data.
-    await record(client, mapping, info.activityType, subject, inputs, { status: "failed", recordId, evidence: [identity, ...cited], usage: used, pricer });
+    await record(client, mapping, info.activityType, subject, inputs, { status: "failed", recordId, evidence: [...identity, ...cited], usage: used, pricer, ...human });
     throw err;
   }
-  await record(client, mapping, info.activityType, subject, inputs, { status: "acted", recordId, evidence: [identity, ...cited], result, usage: used, pricer });
+  await record(client, mapping, info.activityType, subject, inputs, { status: "acted", recordId, evidence: [...identity, ...cited], result, usage: used, pricer, ...human });
   return result;
 }
 
-async function record(client, mapping, activityType, subject, inputs, { status, recordId, evidence, result, usage: used = [], pricer, humanNote }) {
+async function record(client, mapping, activityType, subject, inputs, { status, recordId, evidence, result, usage: used = [], pricer, humanNote, humanReviewer }) {
   let verdict;
   let id = recordId;
   try {
@@ -230,7 +248,7 @@ async function record(client, mapping, activityType, subject, inputs, { status, 
         }
         d.modelCall(call.provider, call.model, { tokensIn: call.tokensIn, tokensOut: call.tokensOut, amount });
       }
-      if (verdict.result === "escalate") d.requireHuman({ note: humanNote });
+      if (humanReviewer || verdict.result === "escalate") d.requireHuman({ reviewer: humanReviewer, note: humanNote });
       if (status === "acted") d.act(mapping.action ?? activityType, { costCentre: mapping.costCentre });
       else if (status === "failed") throw new ToolCallFailed("ToolCallFailed");
     });
@@ -281,4 +299,75 @@ function evidenceFrom(headers) {
   } catch (err) {
     throw new AdapterError(`the evidence header could not be decoded: ${err?.constructor?.name ?? "Error"}`);
   }
+}
+
+/** The approval `approved()` attached in workflow code (either SDK's), or `null`. */
+function approvalFrom(headers) {
+  const payload = headers?.[APPROVAL_HEADER];
+  if (payload === undefined) return null;
+  let approval;
+  try {
+    const encoding = new TextDecoder().decode(payload.metadata?.encoding);
+    if (encoding !== "json/plain") throw new TypeError(`encoding ${encoding}`);
+    approval = JSON.parse(new TextDecoder().decode(payload.data));
+  } catch (err) {
+    throw new AdapterError(`the approval header could not be decoded: ${err?.constructor?.name ?? "Error"}`);
+  }
+  const { reviewer, record_id: recordId, note } = approval ?? {};
+  if (typeof reviewer !== "string" || !reviewer || typeof recordId !== "string" || !ULID_RE.test(recordId)) {
+    throw new AdapterError("the approval header needs a reviewer and the escalated decision's record id");
+  }
+  return { reviewer, record_id: recordId, note: typeof note === "string" ? note : null };
+}
+
+/**
+ * The `warrant.record` activity that the workflow-side helpers (`decide()`, `verdict()`,
+ * `rejected()`) write through, as a local activity. `warrantPlugin()` registers it; without the
+ * plugin, add it to the worker's activities under `RECORD_ACTIVITY`.
+ */
+export function warrantRecordActivity(client) {
+  if (!client || typeof client.decide !== "function") throw new TypeError("client must be a Warrant instance");
+  return async function warrantRecord(request) {
+    if (request === null || typeof request !== "object" || Array.isArray(request)) {
+      throw ApplicationFailure.nonRetryable("warrant.record needs a request object", UNREADABLE);
+    }
+    try {
+      if (request.kind === "decision") return await workflowDecision(client, request);
+      if (request.kind === "verdict") return workflowVerdict(client, request);
+    } catch (err) {
+      if (!(err instanceof TypeError) && !(err instanceof RangeError)) throw err;
+      throw ApplicationFailure.nonRetryable(`warrant.record: ${err.message}`, UNREADABLE);
+    }
+    throw ApplicationFailure.nonRetryable(`warrant.record: unknown request kind ${JSON.stringify(request.kind)}`, UNREADABLE);
+  };
+}
+
+async function workflowDecision(client, request) {
+  const { inputs } = request;
+  if (inputs === null || typeof inputs !== "object" || Array.isArray(inputs)) throw new TypeError("inputs must be an object with string keys");
+  const identity = request.identity ?? {};
+  const uri = `temporal://${identity.namespace}/${identity.workflow_id}/${identity.workflow_run_id}`;
+  let verdict;
+  let status = "withheld";
+  let id = request.record_id;
+  await client.decide(request.decision_class, { subject: request.subject, onBehalfOf: request.on_behalf_of ?? undefined, alternatives: request.alternatives ?? undefined, recordId: request.record_id }, (d) => {
+    id = d.recordId;
+    verdict = d.check(inputs);
+    d.evidence("temporal.execution", { uri, type: "other", content: { ...identity } });
+    if (verdict.result === "escalate") d.requireHuman({ note: "awaiting a human's decision" });
+    if (verdict.result === "allow" || verdict.result === "unchecked") {
+      d.act(request.action, { summary: request.summary ?? undefined });
+      status = "acted";
+    }
+  });
+  client._log?.info?.(`warrant adapter recorded ${id} class=${request.decision_class} status=${status} mandate=${verdict.result} (workflow side)`);
+  return {
+    record_id: id, status, result: verdict.result, policy_id: verdict.policyId ?? null, policy_version: verdict.policyVersion ?? null,
+    clause: verdict.clause ?? null, reason: verdict.reason ?? null, flagged: verdict.flagged,
+  };
+}
+
+function workflowVerdict(client, request) {
+  const id = client.humanVerdict({ reviewer: request.reviewer, verdict: request.verdict, decisionRecordId: request.decision_record_id, note: request.note ?? undefined, recordId: request.record_id });
+  return { record_id: id, verdict: request.verdict };
 }
