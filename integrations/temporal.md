@@ -15,8 +15,8 @@ Gating and recording activities needs no change to workflow code. Handling an es
 |---|---|---|
 | Package | `warrantai[temporal]` on PyPI, `temporalio >= 1.32`, Python 3.10+ | `warrantai` on npm with `@temporalio/activity` and `@temporalio/workflow ^1.24`, Node 20.3+ |
 | Plugin | `warrant.adapters.temporal.WarrantPlugin`, named `warrant.WarrantPlugin` | `warrantPlugin()` from `warrantai/adapters/temporal`, named `warrantai.WarrantPlugin` |
-| Activity side | gate, record, evidence, cost, approvals | gate, record, evidence, cost |
-| Workflow side | evidence header; `decide()`, `escalation()`, `approved()`, `rejected()`, `verdict()` | evidence header; the helpers not yet, [issue #6](https://github.com/warrant-ai/warrant/issues/6) |
+| Activity side | gate, record, evidence, cost, approvals | gate, record, evidence, cost, approvals |
+| Workflow side | evidence header; `decide()`, `escalation()`, `approved()`, `rejected()`, `verdict()` | evidence header; the same helpers from `warrantai/adapters/temporal/workflow` |
 | Source | `python/src/warrant/adapters/temporal.py`, `temporal_workflow.py` | `js/src/adapters/temporal.js`, `temporal-workflow.js` |
 
 Library documentation: [Python](../python/README.md), [JavaScript](../js/README.md). Record format: [spec/adr-0.2.md](../spec/adr-0.2.md).
@@ -81,7 +81,7 @@ class LoanApproval:
             await warrant.rejected(escalated["record_id"], reviewer=self.review.reviewer, note=self.review.reason)
 ```
 
-`decide()` writes through the `warrant.record` local activity, so the record and the verdict are in history and a replay never writes twice. Its ids come from `workflow.now()` and `workflow.uuid4()`, both deterministic. The local activity carries a summary (`warrant: <class> for <subject>`) for the Temporal UI.
+`decide()` writes through the `warrant.record` local activity, so the record and the verdict are in history and a replay never writes twice. Its ids come from the start time in the workflow's initialization and `workflow.uuid4()`. Both are the same when a failed workflow task is retried, which runs its local activities again (their results reach history only when the task completes), so the retry writes the same record id and the store keeps one. `workflow.now()` would not do: it moves on between the attempts. The local activity carries a summary (`warrant: <class> for <subject>`) for the Temporal UI.
 
 **Adding `decide()` to a workflow that already has open executions.** `decide()` schedules a local activity, so adding a call to an existing workflow type changes the commands it produces, and open executions would fail replay with a non-determinism error. Treat it like any other workflow change: put the new call behind `workflow.patched(...)` or use Worker Versioning. A workflow written with `decide()` from the start needs neither. To check a change before deploying it, replay histories captured from open executions against the new build with `Replayer`; that catches a missing patch, which a static check cannot, since only the histories show whether open executions exist. The plugin schedules no commands of its own: the activity-side interceptor runs on the activity worker, and the workflow-side interceptor only adds headers to activity starts. So adding the plugin to a worker needs no versioning, and neither does removing it from a workflow that does not call the helpers above (those schedule the `warrant.record` local activity, which the plugin registers). In Python this is tested both ways: a history recorded without the plugin replays on a worker with it, and the reverse.
 
@@ -108,9 +108,29 @@ const plugin = warrantPlugin(w, {
 const worker = await Worker.create({ connection, taskQueue: "lending", workflowsPath, activities, plugins: [plugin] });
 ```
 
-The plugin adds the activity interceptor and registers a workflow interceptor module for the worker's workflow bundle, so evidence reaches the decision across workers exactly as in Python, in the same `warrant-evidence` header with the same items and the same hashes, so either SDK's activity side can read the other's header (checked at the payload level; a mixed-language worker set has not been run). Workflow code runs in Temporal's sandbox and cannot be handed the decision mapping at run time, so `warrantWorkflowInterceptorModule(decisions)` writes a small module that names the decision activity types, once per set of types, under the system temporary directory. A worker given a prebuilt `workflowBundle` ignores `workflowModules`; pass that path to `bundleWorkflowCode({ workflowInterceptorModules })` instead. The `evidence` filter runs on the decision's worker, against each item's activity type. Inside the sandbox there is no `node:crypto`, so the hashes there use a dependency-free SHA-256, tested against `node:crypto` byte for byte.
+The plugin adds the activity interceptor, registers a workflow interceptor module for the worker's workflow bundle, and registers the `warrant.record` activity the workflow-side helpers write through. Evidence reaches the decision across workers exactly as in Python, in the same `warrant-evidence` header with the same items and the same hashes, so either SDK's activity side can read the other's header (checked at the payload level). The approval header is checked across a real mixed-language run: a JS workflow approves an escalated activity that a Python worker runs. Workflow code runs in Temporal's sandbox and cannot be handed the decision mapping at run time, so `warrantWorkflowInterceptorModule(decisions)` writes a small module that names the decision activity types, once per set of types, under the system temporary directory. A worker given a prebuilt `workflowBundle` ignores `workflowModules`; pass that path to `bundleWorkflowCode({ workflowInterceptorModules })` instead. The `evidence` filter runs on the decision's worker, against each item's activity type. Inside the sandbox there is no `node:crypto`, so the hashes there use a dependency-free SHA-256, tested against `node:crypto` byte for byte.
 
-The activity side behaves as in Python: the single object argument is read (any other call shape is presented as `{ args }` for a mapping function), `WarrantDenied` and `WarrantEscalated` are non-retryable `ApplicationFailure`s with the record id in their details, failed attempts are recorded without error text, `modelUsage()` puts a model call's cost on the record, and record ids match the Python adapter byte for byte. Without the plugin, give the worker `interceptors: { activity: [warrantActivityInterceptor(...)], workflowModules: [warrantWorkflowInterceptorModule(decisions)] }`. The workflow-side helpers (`decide()`, approvals) are not built for TypeScript yet.
+The activity side behaves as in Python: the single object argument is read (any other call shape is presented as `{ args }` for a mapping function), `WarrantDenied` and `WarrantEscalated` are non-retryable `ApplicationFailure`s with the record id in their details, failed attempts are recorded without error text, `modelUsage()` puts a model call's cost on the record, and record ids match the Python adapter byte for byte. Without the plugin, give the worker `interceptors: { activity: [warrantActivityInterceptor(...)], workflowModules: [warrantWorkflowInterceptorModule(decisions)] }` and register `warrantRecordActivity(w)` under `"warrant.record"` in `activities`.
+
+### Decisions and approvals in TypeScript workflow code
+
+```js
+import { approved, decide, escalation, rejected } from "warrantai/adapters/temporal/workflow";
+
+const verdict = await decide("credit.approve", { subject: loan.id, inputs: { amount: loan.amount, bureau_score: loan.bureau_score, foir: loan.foir }, action: "approve" });
+
+try {
+  return await disburse(loan);
+} catch (err) {
+  const escalated = escalation(err);
+  if (escalated === null) throw err;
+  if (!(await condition(() => review !== undefined, "2 days"))) return rejected(escalated.record_id, { reviewer: "system", note: "timed out" });
+  if (!review.approve) return rejected(escalated.record_id, { reviewer: review.reviewer, note: review.reason });
+  return approved("disburse", [loan], { reviewer: review.reviewer, recordId: escalated.record_id, startToCloseTimeout: "1 minute" });
+}
+```
+
+The helpers behave as the Python ones: the same `warrant.record` request shapes, the same `warrant-approval` header, the same verdict keys (`record_id`, `status`, `result`, `policy_id`, `policy_version`, `clause`, `reason`, `flagged`), and record ids from the workflow's initialization start time and `uuid4()`. `approved()` takes the activity type, its arguments and the activity options, and schedules exactly that activity, so the approval cannot attach to a different one; on a worker without Warrant's workflow interceptor module it throws rather than run the activity unapproved. The same versioning rule applies to `decide()` as in Python: `patched()` only when adding it to a workflow type with open executions.
 
 ## Test plan
 
@@ -131,21 +151,21 @@ Everything below runs in CI on every push and pull request, and on a weekly sche
 - a decision that fails on every attempt leaves the evidence for the next decision
 - a workflow-side decision is recorded through the local activity, and a replay of the finished history writes nothing. The replay runs against a later build of the workflow that adds a second `decide()` behind `workflow.patched`, which is the upgrade case described above
 - a workflow-side deny is withheld and the workflow branches on it
+- a failed workflow task, retried, records a workflow-side decision once: the retry writes the same record id
 - an escalation approved by a person runs the activity and links the verdict; a rejection or a two-day timeout records the verdict and runs nothing
 - the plugin installs the interceptor, the record activity and the sandbox passthrough on a worker given none of them, and a replay through `Replayer(plugins=[...])` writes nothing
 - the plugin does not double a guard also given as an interceptor
 
-**Integration tests, TypeScript** (`js/test/adapter-temporal.test.js`, workflow bundled from `test/temporal-workflows.js`), Node 20 and 22, `@temporalio/*` 1.24: the same activity-side cases; the evidence reaching a decision on another worker (three workers, each with its own plugin) and the run replaying through `Worker.runReplayHistory` with the plugin; the evidence naming the activity id Temporal assigned, including after a local activity backs off; no evidence without the workflow module; a decision that fails outright leaving the evidence for the next; an undecodable evidence header blocking the decision; the workflow-side hash equal to `contentHash` on 500 random values; SHA-256 against `node:crypto` on every length to 300 bytes and on 1 MiB; record-id parity with Python pinned to a constant; and the plugin on a worker given no interceptors.
+**Integration tests, TypeScript** (`js/test/adapter-temporal.test.js`, workflow bundled from `test/temporal-workflows.js`), Node 20 and 22, `@temporalio/*` 1.24: the same activity-side cases; the evidence reaching a decision on another worker (three workers, each with its own plugin) and the run replaying through `Worker.runReplayHistory` with the plugin; the evidence naming the activity id Temporal assigned, including after a local activity backs off; no evidence without the workflow module; a decision that fails outright leaving the evidence for the next; an undecodable evidence header blocking the decision; the workflow-side hash equal to `contentHash` on 500 random values; a workflow-side decision recorded through the local activity, and an upgrade adding a second `decide()` behind `patched()` replaying while the same upgrade without it fails replay; a workflow-side deny; an escalation approved through an Update, rejected, or timed out after two days; a retried workflow task recording its decision once; `approved()` refusing to run without the workflow interceptor module; the record activity refusing a malformed request; SHA-256 against `node:crypto` on every length to 300 bytes and on 1 MiB; record-id parity with Python pinned to a constant; and the plugin on a worker given no interceptors.
 
 **Side effects on replay.** The only side effect the adapter has in workflow code is the record write, and it is a local activity whose result Temporal keeps in history. The evidence hashes are computed from activity results already in history. The replay tests above assert the record count after the replay.
 
-**Cross-language and record integrity**, every run: 20,000 random records sealed in Python and verified in JavaScript and the reverse; the conformance vectors for hashes, seals, signatures and Merkle proofs; the shared policy cases both CEL engines must evaluate identically.
+**Cross-language and record integrity**, every run: a JS workflow approves an escalated activity that a Python worker runs, both against one Temporal test server, and the Python ledger holds the linked verdict and the approved record (`python/tests/test_temporal_cross_language.py`, its own CI job); 20,000 random records sealed in Python and verified in JavaScript and the reverse; the conformance vectors for hashes, seals, signatures and Merkle proofs; the shared policy cases both CEL engines must evaluate identically.
 
 **Versions this document was checked against:** `temporalio` 1.34.0 and `@temporalio/worker` 1.24.0, on 13 October 2026.
 
 ## Open
 
-- Workflow-side helpers in TypeScript: [#6](https://github.com/warrant-ai/warrant/issues/6)
 - Nexus operations as decisions, with the caller citing the handler's record: [#7](https://github.com/warrant-ai/warrant/issues/7)
 - A worked example with a `temporalio.contrib` agent integration: [#10](https://github.com/warrant-ai/warrant/issues/10)
 

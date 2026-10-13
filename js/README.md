@@ -97,9 +97,52 @@ const plugin = warrantPlugin(w, {
 const worker = await Worker.create({ ..., activities, plugins: [plugin] });
 ```
 
-The plugin adds the activity interceptor and a workflow interceptor module to the worker and appears in its logs as `warrantai.WarrantPlugin`; put it on every worker, the workflow's and the activities'. Without it, use `interceptors: { activity: [warrantActivityInterceptor(w, decisions, options)], workflowModules: [warrantWorkflowInterceptorModule(decisions)] }`. Needs `@temporalio/activity` and `@temporalio/workflow`. The full guide, with the test plan, is `integrations/temporal.md`.
+The plugin adds the activity interceptor and a workflow interceptor module to the worker and appears in its logs as `warrantai.WarrantPlugin`; put it on every worker, the workflow's and the activities'. Without it, use `interceptors: { activity: [warrantActivityInterceptor(w, decisions, options)], workflowModules: [warrantWorkflowInterceptorModule(decisions)] }` and register `warrantRecordActivity(w)` under `RECORD_ACTIVITY` (`"warrant.record"`) in `activities`. Needs `@temporalio/activity` and `@temporalio/workflow`. The full guide, with the test plan, is `integrations/temporal.md`.
 
-Before a mapped activity runs, its single object argument is checked against the policy (any other call shape is presented as `{ args }` for mapping functions to read). A denied or escalated activity is recorded as withheld and fails with a non-retryable `ApplicationFailure` of type `WarrantDenied` or `WarrantEscalated`, so the retry policy does not re-run it and the workflow can catch it and hand the case to a person; the failure's details carry the record id. Every record names the Temporal execution as evidence. One record per attempt, with ids derived from the attempt's identity, so a batch delivered twice is written once. The run's earlier activities are evidence for its next decision, by hash: the workflow interceptor keeps the hashes in workflow state and passes them to the decision in a header, so they reach it on any worker. `modelUsage(provider, model, { tokensIn, tokensOut })` inside an activity puts the model call's cost on the record. Workflow-side decisions and approval hand-offs are in the Python adapter today.
+Before a mapped activity runs, its single object argument is checked against the policy (any other call shape is presented as `{ args }` for mapping functions to read). A denied or escalated activity is recorded as withheld and fails with a non-retryable `ApplicationFailure` of type `WarrantDenied` or `WarrantEscalated`, so the retry policy does not re-run it and the workflow can catch it and hand the case to a person; the failure's details carry the record id. Every record names the Temporal execution as evidence. One record per attempt, with ids derived from the attempt's identity, so a batch delivered twice is written once. The run's earlier activities are evidence for its next decision, by hash: the workflow interceptor keeps the hashes in workflow state and passes them to the decision in a header, so they reach it on any worker. `modelUsage(provider, model, { tokensIn, tokensOut })` inside an activity puts the model call's cost on the record.
+
+### Decisions and approvals in workflow code
+
+`warrantai/adapters/temporal/workflow` is imported in workflow code. `decide()` records a decision the workflow makes itself; `escalation()`, `approved()` and `rejected()` handle an activity the policy escalated to a person:
+
+```js
+import { condition, defineUpdate, proxyActivities, setHandler } from "@temporalio/workflow";
+import { approved, decide, escalation, rejected } from "warrantai/adapters/temporal/workflow";
+
+const ACTIVITY = { startToCloseTimeout: "1 minute" };
+const { disburse } = proxyActivities(ACTIVITY);
+export const review = defineUpdate("review");
+
+// A decision made in workflow code: recorded, and its verdict returned to branch on.
+export async function creditCheck(loan) {
+  const inputs = { amount: loan.amount, bureau_score: loan.bureau_score, foir: loan.foir };
+  return decide("credit.approve", { subject: loan.id, inputs, action: "approve" });
+}
+
+// An activity the policy escalates: wait for a reviewer's Update, then run it approved, or record the rejection.
+export async function loanApproval(loan) {
+  let decision;
+  setHandler(review, (d) => { decision = d; });
+  try {
+    return await disburse(loan);
+  } catch (err) {
+    const escalated = escalation(err);
+    if (escalated === null) throw err;
+    if (!(await condition(() => decision !== undefined, "2 days"))) {
+      return rejected(escalated.record_id, { reviewer: "system", note: "timed out" });
+    }
+    if (!decision.approve) return rejected(escalated.record_id, { reviewer: decision.reviewer, note: decision.reason });
+    return approved("disburse", [loan], { reviewer: decision.reviewer, recordId: escalated.record_id, ...ACTIVITY });
+  }
+}
+```
+
+- `decide(decisionClass, { subject, inputs, action, summary, alternatives, onBehalfOf })` checks the policy and records the decision through the `warrant.record` local activity, so the record is in history and a replay writes nothing. It resolves to `{ record_id, status, result, policy_id, policy_version, clause, reason, flagged }`: `acted` for allow or unchecked, `withheld` for deny or escalate. Ids come from the workflow's start time and `uuid4()`, so a retried workflow task writes the same record again and the store keeps one.
+- `escalation(err)` returns the details of a `WarrantEscalated` failure, or `null`; `blocked(err)` also returns a denial's. A denial cannot be approved.
+- `approved(activityType, args, { reviewer, recordId, note, ...activityOptions })` schedules the activity with a `warrant-approval` header. The activity side writes the reviewer's verdict as its own record, linked to the escalated decision, before the activity runs, and the activity's record names the reviewer. The reviewer's name comes from your own Update or Signal; Warrant records who it was told and does not authenticate them. If the workflow's worker has no Warrant interceptor module, `approved()` throws instead of running the activity without the approval.
+- `rejected(recordId, { reviewer, note })` and `verdict(recordId, { reviewer, verdict, note })` record a person's verdict, or a timeout, as a linked record.
+
+The header and request shapes are the Python adapter's, so a JS workflow can approve an activity that a Python worker runs; a test runs exactly that. `decide()` schedules a local activity, so adding a call to a workflow type that already has open executions needs `patched()` or Worker Versioning; a workflow written with it from the start needs neither.
 
 ## Agent Decision Record
 

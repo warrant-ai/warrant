@@ -25,7 +25,7 @@ re-imported under the workflow sandbox.
                                                   record_id=escalated["record_id"], start_to_close_timeout=...)
                 await warrant.rejected(escalated["record_id"], reviewer=self.review.reviewer, note=self.review.reason)
 
-Everything here is deterministic: ids come from ``workflow.uuid4()`` and ``workflow.now()``, and
+Everything here is deterministic: ids come from ``workflow.uuid4()`` and the run's start time, and
 records are written by the ``warrant.record`` local activity, whose result Temporal keeps in
 history so replay never writes twice. Because ``decide()`` schedules a local activity, adding a call
 to a workflow type that already has open executions is a workflow change like any other: put it
@@ -261,8 +261,12 @@ def _default_activity_id(handle: Any) -> Optional[str]:
 
 
 def _record_id(tag: str) -> str:
+    """Deterministic across a retried workflow task, which runs its local activities again at a later
+    ``workflow.now()``: the start time from the workflow's initialization and the run's seeded ``uuid4()``
+    are the same on the retry, so the store's duplicate check sees the repeat. Not ``info.start_time``:
+    that is the first task's start, which a retried first task changes. The run id keeps runs apart."""
     info = workflow.info()
-    ts_ms = int(workflow.now().timestamp() * 1000)
+    ts_ms = int(info.workflow_start_time.timestamp() * 1000)
     return deterministic_ulid(ts_ms, f"{info.namespace}|{info.workflow_id}|{info.run_id}|{tag}|{workflow.uuid4()}")
 
 

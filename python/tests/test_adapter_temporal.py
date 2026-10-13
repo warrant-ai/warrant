@@ -265,6 +265,31 @@ def test_workflow_side_decision_is_recorded_through_the_local_activity_and_repla
     assert all(r.ok for r in verify_records([decision]))
 
 
+def test_a_retried_workflow_task_records_a_workflow_side_decision_once(ledger):
+    """A failed workflow task re-runs its local activities on the retry, at a later workflow time. The
+    record id must not depend on that time, or the store's duplicate check cannot see the repeat."""
+    from temporalio.testing import WorkflowEnvironment
+    from temporalio.worker import Worker
+
+    from temporal_app import Loan, RetriedTaskWorkflow
+
+    w, records = ledger
+    guard = WarrantInterceptor(w, {"disburse": DISBURSE})
+
+    async def go():
+        async with await WorkflowEnvironment.start_time_skipping() as env:
+            async with Worker(env.client, task_queue="lending-retried", workflows=[RetriedTaskWorkflow], activities=[guard.record_activity], interceptors=[guard]):
+                handle = await env.client.start_workflow(RetriedTaskWorkflow.run, Loan(**GOOD), id=f"loan-{uuid.uuid4()}", task_queue="lending-retried")
+                out = await handle.result()
+                failed = [e for e in (await handle.fetch_history()).events if e.HasField("workflow_task_failed_event_attributes")]
+                return out, failed
+
+    out, failed = asyncio.run(go())
+    assert len(failed) == 1, "the first workflow task failed and was retried"
+    (decision,) = records()
+    assert decision["record_id"] == out["record_id"]
+
+
 def test_workflow_side_deny_is_withheld_and_the_workflow_branches_on_it(ledger):
     w, records = ledger
     out = _run(WarrantInterceptor(w, {"disburse": DISBURSE}), WEAK, "wf")
