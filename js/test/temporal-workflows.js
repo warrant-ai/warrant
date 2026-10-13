@@ -1,5 +1,5 @@
 // The two-activity loan workflow the Temporal adapter tests run. Bundled by the worker; imports only @temporalio/workflow.
-import { ActivityFailure, ApplicationFailure, proxyActivities } from "@temporalio/workflow";
+import { ActivityFailure, ApplicationFailure, proxyActivities, proxyLocalActivities } from "@temporalio/workflow";
 
 const { underwrite, disburse, disburseDown, disburseFlaky, disburseOpaque } = proxyActivities({
   startToCloseTimeout: "10s",
@@ -38,4 +38,15 @@ const payments = proxyActivities({ taskQueue: "lending-payments", startToCloseTi
 export async function spreadLoanWorkflow(loan) {
   await bureau.underwrite(loan);
   return await payments.disburse(loan);
+}
+
+// A local activity that backs off twice (each retry interval exceeds the local retry threshold, so
+// each retry takes a new sequence number), then an activity, then a named one, then the decision.
+const backoff = proxyLocalActivities({ startToCloseTimeout: "10s", localRetryThreshold: "1s", retry: { initialInterval: "2s", backoffCoefficient: 1, maximumAttempts: 5 } });
+const plain = proxyActivities({ startToCloseTimeout: "10s", retry: { initialInterval: "10ms", maximumAttempts: 3 } });
+const named = proxyActivities({ activityId: "bureau-check", startToCloseTimeout: "10s", retry: { initialInterval: "10ms", maximumAttempts: 3 } });
+
+export async function backoffLoanWorkflow(loan) {
+  const ids = [await backoff.lookupFlaky(loan), await plain.whoami(loan), await named.whoami(loan)];
+  return { ids, result: await plain.disburse(loan) };
 }

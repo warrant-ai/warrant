@@ -120,6 +120,35 @@ def test_evidence_reaches_a_decision_that_runs_on_another_worker(ledger):
     assert all(r.ok for r in verify_records([decision]))
 
 
+def test_evidence_names_the_activity_id_temporal_assigned_even_after_a_local_activity_backoff(ledger):
+    """A local activity backoff takes a new sequence number without passing through the interceptor,
+    so ids counted in the interceptor drift. The ids on the evidence must be the ones Temporal used."""
+    from temporalio.testing import WorkflowEnvironment
+    from temporalio.worker import Replayer, Worker
+
+    from temporal_app import BackoffLoanWorkflow, Loan, disburse_loan, lookup_flaky, whoami
+
+    w, records = ledger
+    guard = WarrantInterceptor(w, {"disburse_loan": DISBURSE})
+
+    async def go():
+        async with await WorkflowEnvironment.start_time_skipping() as env:
+            async with Worker(env.client, task_queue="lending-backoff", workflows=[BackoffLoanWorkflow],
+                              activities=[lookup_flaky, whoami, disburse_loan, guard.record_activity], interceptors=[guard]):
+                handle = await env.client.start_workflow(BackoffLoanWorkflow.run, Loan(**GOOD), id=f"loan-{uuid.uuid4()}", task_queue="lending-backoff")
+                out = await handle.result()
+                await Replayer(workflows=[BackoffLoanWorkflow], interceptors=[guard]).replay_workflow(await handle.fetch_history())
+                return out
+
+    out = asyncio.run(go())
+    looked_up, checked, named = out["ids"]
+    assert looked_up != "1", "the local activity backed off, so its id is not the first sequence number"
+    assert named == "bureau-check"
+    (decision,) = records()
+    cited = [e["uri"] for e in decision["evidence"] if e["uri"].startswith("tool://") and "#" in e["uri"]]
+    assert cited == [f"tool://lookup_flaky#{looked_up}", f"tool://whoami#{checked}", "tool://whoami#bureau-check"]
+
+
 def test_without_the_interceptor_on_the_workflow_worker_a_decision_cites_no_evidence(ledger):
     w, records = ledger
     assert _spread(w, workflow_guarded=False) == "disbursed LN-1"
@@ -352,3 +381,44 @@ def test_plugin_passes_warrant_through_the_sandbox_and_leaves_other_runners_alon
     assert {"warrant", "their_lib"} <= merged.restrictions.passthrough_modules and merged.runner_class is theirs.runner_class
     unsandboxed = UnsandboxedWorkflowRunner()
     assert _passthrough_warrant(unsandboxed) is unsandboxed
+
+
+def test_an_unreadable_sequence_number_names_no_id_rather_than_a_guess():
+    from warrant.adapters.temporal_workflow import _default_activity_id
+
+    class Handle:
+        pass
+
+    assert _default_activity_id(Handle()) is None
+    h = Handle()
+    h._seq = 7
+    assert _default_activity_id(h) == "7"
+    h._seq = True
+    assert _default_activity_id(h) is None
+
+
+@pytest.mark.parametrize("recorded_with,replayed_with", [(False, True), (True, False)])
+def test_adding_or_removing_the_plugin_does_not_break_replay_of_open_executions(ledger, recorded_with, replayed_with):
+    """The plugin adds headers to activity commands but schedules none, so a history recorded on one
+    side of the change replays on the other. The guide's 'no versioning needed' rests on this."""
+    from temporalio.testing import WorkflowEnvironment
+    from temporalio.worker import Replayer, Worker
+
+    from warrant.adapters.temporal import WarrantPlugin
+
+    from temporal_app import BackoffLoanWorkflow, Loan, disburse_loan, lookup_flaky, whoami
+
+    w, _records = ledger
+
+    def plugins(on):
+        return [WarrantPlugin(WarrantInterceptor(w, {"disburse_loan": DISBURSE}))] if on else []
+
+    async def go():
+        async with await WorkflowEnvironment.start_time_skipping() as env:
+            async with Worker(env.client, task_queue="lending-upgrade", workflows=[BackoffLoanWorkflow],
+                              activities=[lookup_flaky, whoami, disburse_loan], plugins=plugins(recorded_with)):
+                handle = await env.client.start_workflow(BackoffLoanWorkflow.run, Loan(**GOOD), id=f"loan-{uuid.uuid4()}", task_queue="lending-upgrade")
+                await handle.result()
+            await Replayer(workflows=[BackoffLoanWorkflow], plugins=plugins(replayed_with)).replay_workflow(await handle.fetch_history())
+
+    asyncio.run(go())

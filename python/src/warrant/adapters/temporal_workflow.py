@@ -204,8 +204,6 @@ class _Outbound(WorkflowOutboundInterceptor):
         self._is_evidence = is_evidence
         # Results of this run's evidence activities since the last decision, as hashes.
         self._evidence: List[Dict[str, str]] = []
-        # The SDK's default activity id is this sequence number, shared by activities and local activities.
-        self._seq = 0
 
     def start_activity(self, input: StartActivityInput) -> Any:
         approval = _pending.get()
@@ -218,8 +216,6 @@ class _Outbound(WorkflowOutboundInterceptor):
         return self._track(input, self.next.start_local_activity)
 
     def _track(self, input: Any, start: Callable[[Any], Any]) -> Any:
-        self._seq += 1
-        activity_id = input.activity_id or str(self._seq)
         if input.activity in self._decisions:
             cited = list(self._evidence)
             if cited:
@@ -228,15 +224,16 @@ class _Outbound(WorkflowOutboundInterceptor):
             handle.add_done_callback(lambda done: self._consume(done, cited))
         elif input.activity != RECORD_ACTIVITY and self._is_evidence(input.activity):
             handle = start(input)
-            handle.add_done_callback(lambda done: self._add(done, input.activity, activity_id))
+            handle.add_done_callback(lambda done: self._add(done, input.activity, input.activity_id))
         else:
             handle = start(input)
         return handle
 
-    def _add(self, done: Any, activity_type: str, activity_id: str) -> None:
+    def _add(self, done: Any, activity_type: str, activity_id: Optional[str]) -> None:
         if done.cancelled() or done.exception() is not None:
             return
-        uri = f"tool://{activity_type}#{activity_id}"
+        activity_id = activity_id or _default_activity_id(done)
+        uri = f"tool://{activity_type}#{activity_id}" if activity_id else f"tool://{activity_type}"
         self._evidence.append({"name": activity_type, "uri": uri, "content_hash": content_hash(as_evidence_content(done.result()))})
         del self._evidence[:-MAX_EVIDENCE]
 
@@ -249,6 +246,18 @@ class _Outbound(WorkflowOutboundInterceptor):
         if exc is not None and blocked(exc) is None:
             return
         self._evidence = [item for item in self._evidence if item not in cited]
+
+
+def _default_activity_id(handle: Any) -> Optional[str]:
+    """The id the SDK gave an activity the workflow did not name: its sequence number, read once it finished.
+
+    The SDK assigns it after interceptors run, and a local activity that backs off takes a new
+    sequence number without passing through them again, so counting starts here drifts. The handle
+    holds the number the last attempt ran under. There is no public accessor; if this private field
+    goes, the evidence names the activity type without an id rather than a guessed one.
+    """
+    seq = getattr(handle, "_seq", None)
+    return str(seq) if isinstance(seq, int) and not isinstance(seq, bool) else None
 
 
 def _record_id(tag: str) -> str:
