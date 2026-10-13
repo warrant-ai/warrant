@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.11.0 (2026-10-13)
 
 The Temporal integration as a plugin in both SDKs, with evidence carried in workflow state across workers and decisions and approvals in TypeScript workflow code; policy versions chosen by instant rather than by text.
