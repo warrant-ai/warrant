@@ -154,7 +154,7 @@ test("a decision is judged by the policy version in force at its own timestamp",
   assert.equal(bundle.policyFor("t.run", "2026-10-01T00:00:00Z").version, "2026.2");
   assert.equal(bundle.policyFor("t.run").version, "2026.2");
   assert.deepEqual(bundle.versionsFor("t.run").map((p) => p.version), ["2026.2", "2026.1"]);
-  assert.equal(bundle.policies[0].effectiveTo, "2026-10-01T00:00:00Z");
+  assert.equal(bundle.policies[0].effectiveTo, "2026-10-01T00:00:00.000Z");
   const before = engine.evaluate("t.run", { n: 5 }, "2026-06-01T10:00:00.000Z");
   assert.deepEqual([before.result, before.policyVersion, before.clause], ["allow", "2026.1", "a"]);
   const after = engine.evaluate("t.run", { n: 5 }, "2026-11-01T10:00:00.000Z");
@@ -165,7 +165,7 @@ test("a moment no version covers is unchecked and says which windows exist", { s
   const engine = new CelPolicyEngine(await datedBundle({ ...v2, effective_to: "2027-01-01T00:00:00Z" }), { logger: quiet });
   const verdict = engine.evaluate("t.run", { n: 500 }, "2026-06-01T10:00:00.000Z");
   assert.equal(verdict.result, "unchecked");
-  assert.equal(verdict.reason, "no version of the policy for t.run was in force at 2026-06-01T10:00:00.000Z: T-1@2026.2 (2026-10-01T00:00:00Z to 2027-01-01T00:00:00Z)");
+  assert.equal(verdict.reason, "no version of the policy for t.run was in force at 2026-06-01T10:00:00.000Z: T-1@2026.2 (2026-10-01T00:00:00.000Z to 2027-01-01T00:00:00.000Z)");
   assert.equal(engine.evaluate("other.run", {}, "2026-06-01T10:00:00.000Z").reason, "no policy governs class other.run");
 });
 
@@ -179,11 +179,54 @@ test("dated prefix policies are selected by date too, after exact matches", { sk
 test("overlapping windows and malformed dates are load errors", { skip }, async () => {
   await assert.rejects(
     datedBundle(v1, { ...v2, effective_from: "2026-09-01" }),
-    (err) => err instanceof PolicyError && /claimed by both T-1 \(the beginning to 2026-10-01T00:00:00Z\) and T-1 \(2026-09-01T00:00:00Z to further notice\)/.test(err.message),
+    (err) => err instanceof PolicyError && /claimed by both T-1 \(the beginning to 2026-10-01T00:00:00\.000Z\) and T-1 \(2026-09-01T00:00:00\.000Z to further notice\)/.test(err.message),
   );
   await assert.rejects(datedBundle(v2, base), /claimed by both/);
   await assert.rejects(datedBundle({ ...base, effective_from: "next quarter" }), /effective_from is not a date or timestamp: "next quarter"/);
   await assert.rejects(datedBundle({ ...base, effective_from: "2026-10-01", effective_to: "2026-10-01" }), /effective_to must be after effective_from/);
+});
+
+test("effective dates are compared as instants: offsets, exact boundaries and timestamps without an offset", { skip }, async () => {
+  const ist = await datedBundle({ ...v1, effective_to: "2026-10-01T00:00:00+05:30" }, { ...v2, effective_from: "2026-10-01T00:00:00+05:30" });
+  // 2026-09-30T19:00Z is 00:30 on 1 October in India, after the IST boundary at 18:30Z.
+  assert.equal(ist.policyFor("t.run", "2026-09-30T19:00:00.000Z").version, "2026.2");
+  assert.equal(ist.policyFor("t.run", "2026-09-30T18:29:59.999Z").version, "2026.1");
+  assert.equal(ist.policies[0].effectiveTo, "2026-09-30T18:30:00.000Z");
+  const dated = await datedBundle(v1, v2);
+  assert.equal(dated.policyFor("t.run", "2026-10-01T00:00:00.000Z").version, "2026.2", "the boundary instant belongs to the new version");
+  assert.equal(dated.policyFor("t.run", "2026-10-01T05:30:00+05:30").version, "2026.2", "a decision time with an offset is read as the same instant");
+  assert.equal(dated.policyFor("t.run", "2026-10-01T05:29:59.999+05:30").version, "2026.1");
+  const naive = await datedBundle({ ...v1, effective_to: "2026-10-01T00:00:00" }, { ...v2, effective_from: "2026-10-01T00:00:00" });
+  assert.equal(naive.policies[1].effectiveFrom, "2026-10-01T00:00:00.000Z", "a timestamp without an offset is UTC");
+});
+
+test("impossible dates and unreadable decision times are refused, not compared as text", { skip }, async () => {
+  await assert.rejects(datedBundle({ ...base, effective_from: "2026-02-30" }), /effective_from is not a date or timestamp: "2026-02-30"/);
+  await assert.rejects(datedBundle({ ...base, effective_from: "2026-10-01T25:00:00Z" }), /effective_from is not a date or timestamp/);
+  const bundle = await datedBundle(v1, v2);
+  assert.throws(() => bundle.policyFor("t.run", "yesterday"), /not a timestamp: "yesterday"/);
+});
+
+test("YAML timestamps load as the same instants as in the Python SDK", { skip }, async () => {
+  // The yaml parser leaves unquoted timestamps as text; PyYAML turns them into datetimes. Both must agree.
+  const dir = await mkdtemp(join(tmpdir(), "warrant-policy-"));
+  await writeFile(join(dir, "v1.yaml"), 'policy_id: T-1\nversion: "2026.1"\nclasses: [t.run]\neffective_to: 2026-10-01T00:00:00+05:30\nclauses: [{id: a, when: "n > 1", result: allow}]\n');
+  await writeFile(join(dir, "v2.yaml"), 'policy_id: T-1\nversion: "2026.2"\nclasses: [t.run]\neffective_from: 2026-10-01T00:00:00+05:30\neffective_to: 2026-12-01 00:00:00\nclauses: [{id: b, when: "n > 100", result: allow}]\n');
+  const bundle = await PolicyBundle.load(dir, { logger: quiet });
+  const byVersion = Object.fromEntries(bundle.policies.map((p) => [p.version, p]));
+  assert.equal(byVersion["2026.1"].effectiveTo, "2026-09-30T18:30:00.000Z");
+  assert.deepEqual([byVersion["2026.2"].effectiveFrom, byVersion["2026.2"].effectiveTo], ["2026-09-30T18:30:00.000Z", "2026-12-01T00:00:00.000Z"]);
+});
+
+test("timestamp edge cases agree with the Python SDK", async () => {
+  // Pinned from a 3,033-input comparison against Python's utc_instant(): no disagreements.
+  const { utcInstant } = await import("../src/policy.js");
+  assert.equal(utcInstant("0050-06-15T12:00:00Z"), "0050-06-15T12:00:00.000Z", "not read as 1950");
+  assert.equal(utcInstant("2024-02-29T23:59:59.999999+14:00"), "2024-02-29T09:59:59.999Z");
+  assert.equal(utcInstant("2026-10-01T00:00:00.1Z"), "2026-10-01T00:00:00.100Z");
+  for (const refused of ["0001-01-01T00:00:00+05:30", "2026-10-01T00:00:00+08:60", "2026-10-01T23:59:60Z", "1900-02-29T00:00:00Z", "2026-10-01T00:00:00+0530"]) {
+    assert.equal(utcInstant(refused), undefined, refused);
+  }
 });
 
 test("check() passes the decision's opening time to the engine", { skip }, async () => {

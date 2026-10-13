@@ -263,13 +263,15 @@ def _cmd_set_list(args: argparse.Namespace) -> int:
     if not files:
         print("no sets")
         return 0
+    unreadable = 0
     for f in files:
         try:
             ds = DecisionSet.load(f)
             print(f"{ds.name}: {len(ds)} decision(s), created {ds.created_at}, from stream {ds.source.get('stream')}")
         except (ValueError, OSError) as exc:
+            unreadable += 1
             print(f"{f.name}: unreadable ({exc})", file=sys.stderr)
-    return 0
+    return 1 if unreadable else 0
 
 
 def _cmd_target_add(args: argparse.Namespace) -> int:
@@ -301,7 +303,12 @@ def _cmd_target_add(args: argparse.Namespace) -> int:
 def _cmd_target_list(args: argparse.Namespace) -> int:
     from warrant.replay import load_targets
 
-    targets = load_targets(_workspace(args) / "targets.json")
+    path = _workspace(args) / "targets.json"
+    try:
+        targets = load_targets(path)
+    except (ValueError, json.JSONDecodeError) as exc:
+        print(f"{path}: {exc}", file=sys.stderr)
+        return 1
     if not targets:
         print("no targets")
         return 0

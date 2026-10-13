@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from json.encoder import encode_basestring
 from typing import Any, Callable, Mapping, Optional
 
@@ -80,7 +81,7 @@ def _key(key: Any) -> str:
 
 def _number(value: float) -> str:
     """A double as ECMAScript's Number::toString writes it, which is what RFC 8785 requires."""
-    if value != value or value in (float("inf"), float("-inf")):
+    if not math.isfinite(value):
         raise ValueError("NaN and Infinity have no canonical JSON form")
     if value == 0:
         return "0"

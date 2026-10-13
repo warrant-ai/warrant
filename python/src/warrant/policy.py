@@ -30,6 +30,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
@@ -46,7 +47,7 @@ _FAIL_RESULT = {"closed": "deny", "open": "allow", "escalate": "escalate"}
 # An input compared directly with a decimal literal. A whole-number input (0, 1, 40) is an
 # int, and CEL engines disagree on int-versus-double comparison; double(x) is portable.
 _BARE_DECIMAL_COMPARISON = re.compile(
-    r"(?<![\w.)])([a-z_][\w.]*)\s*(?:<=|>=|==|!=|<|>)\s*\d+\.\d+|\d+\.\d+\s*(?:<=|>=|==|!=|<|>)\s*([a-z_][\w.]*)(?![\w.(])", re.IGNORECASE
+    r"(?<![\w.)])([a-z_][\w.]*)\s*(?:<=|>=|==|!=|<|>)\s*\d+\.\d+|(?<![\w.])\d+\.\d+\s*(?:<=|>=|==|!=|<|>)\s*([a-z_][\w.]*)(?![\w.(])", re.IGNORECASE
 )
 # One input divided by another. Whole numbers divide as integers (30000 / 50000 is 0).
 _BARE_DIVISION = re.compile(r"(?<![\w.)])([a-z_][\w.]*)\s*/\s*([a-z_][\w.]*)(?![\w.(])", re.IGNORECASE)
@@ -91,7 +92,8 @@ class Clause:
 
 OBLIGATION_KINDS = ("verifiable", "advisory")
 OBLIGATION_TYPES = ("model_call", "tool_call", "document", "web", "other", "record", "mandate", "attestation", "human_review")
-_DURATION = re.compile(r"^\s*(\d+)\s*([smhd]?)\s*$")
+# Matched against the stripped value: whitespace on both sides of an optional unit backtracks quadratically.
+_DURATION = re.compile(r"^(\d+)\s*([smhd]?)$")
 _UNIT_SECONDS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
 
 
@@ -103,7 +105,7 @@ def parse_duration(value: Any, where: str) -> int:
         if value < 0:
             raise PolicyError(f"{where}: a duration cannot be negative")
         return value
-    match = _DURATION.match(str(value))
+    match = _DURATION.match(str(value).strip())
     if not match:
         raise PolicyError(f"{where}: not a duration (use e.g. 30d, 12h, 90m or seconds): {value!r}")
     return int(match.group(1)) * _UNIT_SECONDS[match.group(2)]
@@ -168,6 +170,8 @@ class Policy:
 
     def covers(self, at: Optional[str]) -> bool:
         """Was this version in force at ``at``? An undated policy is in force always."""
+        if at is not None:
+            at = _instant(at)
         if at is None or (self.effective_from is None and self.effective_to is None):
             return self.effective_from is None or self.effective_from <= (at or "")
         if self.effective_from is not None and at < self.effective_from:
@@ -195,32 +199,78 @@ class PolicyTestResult:
 
 
 
-def _as_date(file_name: str, value: Any, field_name: str) -> Optional[str]:
-    """A date or timestamp, normalised so string comparison against a record timestamp is correct.
+# RFC 3339, with the space separator YAML also allows (PyYAML reads an unquoted one as a datetime; the JS SDK sees text).
+_TIMESTAMP = re.compile(r"^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})?$")
 
-    A bare ``2026-10-01`` becomes ``2026-10-01T00:00:00Z``: policies are written by compliance
+
+def utc_instant(text: str) -> Optional[str]:
+    """``text`` as ``YYYY-MM-DDTHH:MM:SS.mmmZ`` in UTC, the form records carry, or ``None`` if it is not a timestamp.
+
+    Effective dates are compared with decision times as strings, which is only right when both are
+    in this one fixed-width form: ``2026-10-01T00:00:00+05:30`` sorts after ``2026-09-30T19:00:00Z``
+    as text although it is earlier, and ``...00:00Z`` sorts after ``...00:00.000Z``. A timestamp
+    without an offset is UTC. Fractions are cut to milliseconds, as the JavaScript SDK must.
+    """
+    match = _TIMESTAMP.match(text) if isinstance(text, str) else None
+    if match is None:
+        return None
+    year, month, day, hour, minute, second, fraction, offset = match.groups()
+    try:
+        tz = timezone.utc
+        if offset not in (None, "Z"):
+            if int(offset[4:6]) > 59:
+                return None
+            sign = -1 if offset[0] == "-" else 1
+            tz = timezone(sign * timedelta(hours=int(offset[1:3]), minutes=int(offset[4:6])))
+        moment = datetime(int(year), int(month), int(day), int(hour), int(minute), int(second),
+                          int(((fraction or "") + "000")[:3]) * 1000, tzinfo=tz)
+    except ValueError:
+        return None
+    return _format_utc(moment)
+
+
+def _format_utc(moment: datetime) -> Optional[str]:
+    """``moment`` in UTC, or ``None`` when that falls outside years 1 to 9999 (``0001-01-01T00:00:00+05:30``)."""
+    try:
+        utc = moment.astimezone(timezone.utc)
+    except (OverflowError, ValueError):
+        return None
+    return (f"{utc.year:04d}-{utc.month:02d}-{utc.day:02d}T{utc.hour:02d}:{utc.minute:02d}:{utc.second:02d}"
+            f".{utc.microsecond // 1000:03d}Z")
+
+
+def _instant(at: str) -> str:
+    """A decision time in the comparable form; refuses rather than compare something else as text."""
+    normalised = utc_instant(at)
+    if normalised is None:
+        raise ValueError(f"not a timestamp: {at!r}")
+    return normalised
+
+
+def _as_date(file_name: str, value: Any, field_name: str) -> Optional[str]:
+    """A date or timestamp from a policy file, in the form :func:`utc_instant` returns.
+
+    A bare ``2026-10-01`` becomes ``2026-10-01T00:00:00.000Z``: policies are written by compliance
     teams in dates, and records carry RFC 3339 timestamps, so the two have to be made comparable
     exactly once, here, rather than at every comparison.
     """
     if value is None:
         return None
-    from datetime import date, datetime
-
     if isinstance(value, datetime):
-        text = value.isoformat()
-    elif isinstance(value, date):
-        text = f"{value.isoformat()}T00:00:00Z"
-    else:
-        text = str(value).strip()
-        if not text:
-            return None
-        if len(text) == 10:
-            text = f"{text}T00:00:00Z"
-    try:
-        datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise PolicyError(f"{file_name}: {field_name} is not a date or timestamp: {value!r}") from exc
-    return text if text.endswith("Z") else text
+        normalised = _format_utc(value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc))
+        if normalised is None:
+            raise PolicyError(f"{file_name}: {field_name} is outside years 1 to 9999 in UTC: {value!r}")
+        return normalised
+    if isinstance(value, date):
+        return f"{value.isoformat()}T00:00:00.000Z"
+    text = str(value).strip()
+    if not text:
+        return None
+    normalised = utc_instant(f"{text}T00:00:00Z" if len(text) == 10 else text)
+    if normalised is None:
+        raise PolicyError(f"{file_name}: {field_name} is not a date or timestamp: {value!r}")
+    return normalised
+
 
 def _overlaps(a: Policy, b: Policy) -> bool:
     """Do two versions of a policy both govern at some moment? Undated means always."""
@@ -250,9 +300,9 @@ def _in_force(candidates: Optional[Sequence[Policy]], at: Optional[str]) -> Opti
 
 
 def _now_iso() -> str:
-    from datetime import datetime, timezone
-
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now = _format_utc(datetime.now(timezone.utc))
+    assert now is not None
+    return now
 
 class PolicyBundle:
     """A set of policies with a lookup from decision class to the governing policy."""
@@ -299,6 +349,8 @@ class PolicyBundle:
         written in October be replayed in March and still be judged against the policy that was
         actually in force when it was made — which is the whole reason versions carry dates.
         """
+        if at is not None:
+            at = _instant(at)
         chosen = _in_force(self._exact.get(decision_class), at)
         if chosen is not None:
             return chosen

@@ -28,11 +28,13 @@ test("packaged schema matches the canonical copy", async (t) => {
 });
 
 test("loan approval example is valid", async () => {
-  validate(await example("loan-approval.json"));
+  const record = await example("loan-approval.json");
+  assert.doesNotThrow(() => validate(record));
 });
 
 test("loan outcome example is valid", async () => {
-  validate(await example("loan-outcome.json"));
+  const record = await example("loan-outcome.json");
+  assert.doesNotThrow(() => validate(record));
 });
 
 test("decision without mandate is rejected", async () => {
@@ -91,7 +93,8 @@ async function answered(overrides = {}) {
 }
 
 test("decision with a question set and answers is valid", async () => {
-  validate(await answered());
+  const record = await answered();
+  assert.doesNotThrow(() => validate(record));
 });
 
 test("records without the new fields are still valid", async () => {

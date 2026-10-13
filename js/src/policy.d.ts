@@ -91,3 +91,5 @@ export class CelPolicyEngine implements PolicyEngine {
 export function runPolicyTests(bundle: PolicyBundle, options?: { logger?: Logger }): PolicyTestResult[];
 /** Patterns worth a warning, such as comparing an input with a decimal literal without double(). */
 export function lintClause(when: string): string[];
+/** `text` as `YYYY-MM-DDTHH:MM:SS.mmmZ` in UTC, the form effective dates and decision times are compared in, or `undefined`. */
+export function utcInstant(text: string): string | undefined;

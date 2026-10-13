@@ -403,3 +403,14 @@ def test_an_unknown_gate_is_refused(recorded):
     with pytest.raises(ValueError) as exc:
         replay(_set_from(recorded), Target("v", AgentInfo("a", "1")), decide_v1, fail_on=["vibes"])
     assert "unknown fail-on gate" in str(exc.value)
+
+
+def test_list_commands_exit_non_zero_on_files_they_cannot_read(tmp_path, capsys):
+    ws = str(tmp_path)
+    (tmp_path / "sets").mkdir()
+    (tmp_path / "sets" / "broken.jsonl").write_text("not json\n", encoding="utf-8")
+    assert main(["--workspace", ws, "set", "list"]) == 1
+    assert "broken.jsonl: unreadable" in capsys.readouterr().err
+    (tmp_path / "targets.json").write_text("{not json", encoding="utf-8")
+    assert main(["--workspace", ws, "target", "list"]) == 1
+    assert "targets.json" in capsys.readouterr().err

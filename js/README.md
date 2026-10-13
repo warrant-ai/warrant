@@ -70,7 +70,7 @@ Both SDKs run the shared cases in `conformance/policy-cases.json`, so a bundle b
 
 Any object with a synchronous `evaluate(decisionClass, inputs)` that returns a `Verdict` also works as `policy`, if your rules live somewhere else.
 
-A policy file may carry `effective_from` and `effective_to` (a date or an RFC 3339 timestamp). Two versions of one policy can then sit in the same bundle, and `check()` applies the one in force when the decision was opened; `evaluate` receives that moment as a third argument. Windows that overlap are refused at load.
+A policy file may carry `effective_from` and `effective_to` (a date, read as midnight UTC, or an RFC 3339 timestamp; one with an offset such as `+05:30` is converted to UTC, and one without an offset is UTC). Two versions of one policy can then sit in the same bundle, and `check()` applies the one in force when the decision was opened; `evaluate` receives that moment as a third argument. Windows that overlap are refused at load.
 
 ## Local development
 

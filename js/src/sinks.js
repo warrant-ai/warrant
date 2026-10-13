@@ -31,7 +31,9 @@ async function errorDetail(response) {
 export class HttpSink {
   constructor(url, token, { timeoutMs = 10_000, compress = true, userAgent = "warrantai-js", logger = console, fetch: fetchImpl = globalThis.fetch } = {}) {
     if (typeof url !== "string" || !/^https?:\/\//.test(url)) throw new TypeError("collector url must start with http:// or https://");
-    this.url = `${url.replace(/\/+$/, "")}/v1/records`;
+    let base = url;
+    while (base.endsWith("/")) base = base.slice(0, -1);
+    this.url = `${base}/v1/records`;
     this._token = token ?? process.env.WARRANT_TOKEN;
     this._timeoutMs = timeoutMs;
     this._compress = compress;

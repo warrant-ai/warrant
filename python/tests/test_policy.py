@@ -243,3 +243,95 @@ def test_lint_warns_at_load_and_stays_quiet_for_portable_clauses(tmp_path, caplo
     with caplog.at_level("WARNING", logger="warrant.policy"):
         PolicyBundle.load(tmp_path)
     assert caplog.messages == ["warrant policy T-1 clause a compares foir with a decimal literal; a whole-number input cannot be evaluated by every engine, write double(foir)"]
+
+
+# Effective-dated versions, the same cases as js/test/policy.test.js.
+_BASE = {"policy_id": "T-1", "version": "1", "classes": ["t.run"], "clauses": [{"id": "a", "when": "n > 1", "result": "allow"}]}
+_V1 = {**_BASE, "version": "2026.1", "effective_to": "2026-10-01"}
+_V2 = {**_BASE, "version": "2026.2", "effective_from": "2026-10-01", "clauses": [{"id": "b", "when": "n > 100", "result": "allow"}]}
+
+
+def _dated(tmp_path, *policies):
+    import json
+
+    for i, policy in enumerate(policies):
+        (tmp_path / f"{i}.json").write_text(json.dumps(policy), encoding="utf-8")
+    return PolicyBundle.load(tmp_path)
+
+
+def test_a_decision_is_judged_by_the_version_in_force_at_its_own_timestamp(tmp_path):
+    bundle = _dated(tmp_path, _V1, _V2)
+    assert bundle.policy_for("t.run", "2026-09-30T23:59:59.999Z").version == "2026.1"
+    assert bundle.policy_for("t.run", "2026-10-01T00:00:00Z").version == "2026.2"
+    assert bundle.policy_for("t.run").version == "2026.2"
+    engine = CelPolicyEngine(bundle)
+    before = engine.evaluate("t.run", {"n": 5}, at="2026-06-01T10:00:00.000Z")
+    after = engine.evaluate("t.run", {"n": 5}, at="2026-11-01T10:00:00.000Z")
+    assert (before.result, before.policy_version, after.result, after.policy_version) == ("allow", "2026.1", "deny", "2026.2")
+
+
+def test_effective_dates_are_compared_as_instants(tmp_path):
+    ist = _dated(tmp_path, {**_V1, "effective_to": "2026-10-01T00:00:00+05:30"}, {**_V2, "effective_from": "2026-10-01T00:00:00+05:30"})
+    # 2026-09-30T19:00Z is 00:30 on 1 October in India, after the IST boundary at 18:30Z.
+    assert ist.policy_for("t.run", "2026-09-30T19:00:00.000Z").version == "2026.2"
+    assert ist.policy_for("t.run", "2026-09-30T18:29:59.999Z").version == "2026.1"
+    assert ist.policies[0].effective_to == "2026-09-30T18:30:00.000Z"
+
+
+def test_the_boundary_instant_and_offset_decision_times(tmp_path):
+    bundle = _dated(tmp_path, _V1, _V2)
+    assert bundle.policy_for("t.run", "2026-10-01T00:00:00.000Z").version == "2026.2", "the boundary instant belongs to the new version"
+    assert bundle.policy_for("t.run", "2026-10-01T05:30:00+05:30").version == "2026.2"
+    assert bundle.policy_for("t.run", "2026-10-01T05:29:59.999+05:30").version == "2026.1"
+
+
+def test_a_timestamp_without_an_offset_is_utc(tmp_path):
+    bundle = _dated(tmp_path, {**_V1, "effective_to": "2026-10-01T00:00:00"}, {**_V2, "effective_from": "2026-10-01T00:00:00"})
+    assert bundle.policies[1].effective_from == "2026-10-01T00:00:00.000Z"
+
+
+def test_impossible_dates_and_unreadable_decision_times_are_refused(tmp_path):
+    (tmp_path / "a").mkdir()
+    with pytest.raises(PolicyError, match=r"effective_from is not a date or timestamp: '2026-02-30'"):
+        _dated(tmp_path / "a", {**_BASE, "effective_from": "2026-02-30"})
+    (tmp_path / "b").mkdir()
+    with pytest.raises(PolicyError, match="effective_from is not a date or timestamp"):
+        _dated(tmp_path / "b", {**_BASE, "effective_from": "2026-10-01T25:00:00Z"})
+    (tmp_path / "c").mkdir()
+    bundle = _dated(tmp_path / "c", _V1, _V2)
+    with pytest.raises(ValueError, match="not a timestamp: 'yesterday'"):
+        bundle.policy_for("t.run", "yesterday")
+
+
+def test_yaml_timestamps_load_as_the_same_instants_as_in_javascript(tmp_path):
+    """PyYAML turns unquoted timestamps into datetimes; the JS SDK's yaml parser leaves them as text. Both must agree."""
+    _write(tmp_path, "v1.yaml", """
+        policy_id: T-1
+        version: "2026.1"
+        classes: [t.run]
+        effective_to: 2026-10-01T00:00:00+05:30
+        clauses: [{id: a, when: "n > 1", result: allow}]
+    """)
+    _write(tmp_path, "v2.yaml", """
+        policy_id: T-1
+        version: "2026.2"
+        classes: [t.run]
+        effective_from: 2026-10-01T00:00:00+05:30
+        effective_to: 2026-12-01 00:00:00
+        clauses: [{id: b, when: "n > 100", result: allow}]
+    """)
+    bundle = PolicyBundle.load(tmp_path)
+    by_version = {p.version: p for p in bundle.policies}
+    assert by_version["2026.1"].effective_to == "2026-09-30T18:30:00.000Z"
+    assert (by_version["2026.2"].effective_from, by_version["2026.2"].effective_to) == ("2026-09-30T18:30:00.000Z", "2026-12-01T00:00:00.000Z")
+
+
+def test_timestamp_edge_cases_agree_with_javascript():
+    """Pinned from a 3,033-input comparison against js/src/policy.js utcInstant(): no disagreements."""
+    from warrant.policy import utc_instant
+
+    assert utc_instant("0050-06-15T12:00:00Z") == "0050-06-15T12:00:00.000Z"
+    assert utc_instant("2024-02-29T23:59:59.999999+14:00") == "2024-02-29T09:59:59.999Z"
+    assert utc_instant("2026-10-01T00:00:00.1Z") == "2026-10-01T00:00:00.100Z"
+    for refused in ("0001-01-01T00:00:00+05:30", "2026-10-01T00:00:00+08:60", "2026-10-01T23:59:60Z", "1900-02-29T00:00:00Z", "2026-10-01T00:00:00+0530"):
+        assert utc_instant(refused) is None, refused

@@ -27,11 +27,12 @@ const CLASS_PATTERN = /^[a-z0-9_]+(\.[a-z0-9_]+)*(\.\*)?$/;
 const FAIL_RESULT = { closed: "deny", open: "allow", escalate: "escalate" };
 const POLICY_FILE = /\.(ya?ml|json)$/i;
 const OBLIGATION_KINDS = ["verifiable", "advisory"];
-const DURATION = /^\s*(\d+)\s*([smhd]?)\s*$/;
+// Matched against the trimmed value: whitespace on both sides of an optional unit backtracks quadratically.
+const DURATION = /^(\d+)\s*([smhd]?)$/;
 const UNIT_SECONDS = { "": 1, s: 1, m: 60, h: 3600, d: 86400 };
 // An input compared directly with a decimal literal. A whole-number input (0, 1, 40) is an
 // int, and CEL engines disagree on int-versus-double comparison; double(x) is portable.
-const BARE_DECIMAL_COMPARISON = /(?<![\w.)])([a-z_][\w.]*)\s*(<=|>=|==|!=|<|>)\s*\d+\.\d+|\d+\.\d+\s*(<=|>=|==|!=|<|>)\s*([a-z_][\w.]*)(?![\w.(])/i;
+const BARE_DECIMAL_COMPARISON = /(?<![\w.)])([a-z_][\w.]*)\s*(<=|>=|==|!=|<|>)\s*\d+\.\d+|(?<![\w.])\d+\.\d+\s*(<=|>=|==|!=|<|>)\s*([a-z_][\w.]*)(?![\w.(])/i;
 
 /** A policy file is malformed, a CEL expression does not parse, or the bundle is inconsistent. */
 export class PolicyError extends Error {
@@ -76,7 +77,7 @@ export function parseDuration(value, where) {
     if (value < 0) throw new PolicyError(`${where}: a duration cannot be negative`);
     return value;
   }
-  const match = DURATION.exec(String(value));
+  const match = DURATION.exec(String(value).trim());
   if (!match) throw new PolicyError(`${where}: not a duration (use e.g. 30d, 12h, 90m or seconds): ${JSON.stringify(value)}`);
   return Number(match[1]) * UNIT_SECONDS[match[2]];
 }
@@ -147,19 +148,65 @@ function toCel(value) {
   return value;
 }
 
+// RFC 3339, with the space separator YAML also allows. Same grammar as the Python SDK's utc_instant().
+const TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})?$/;
+
 /**
- * A date or timestamp, normalised so string comparison against a record timestamp is correct.
- * A bare `2026-10-01` becomes `2026-10-01T00:00:00Z`, as the Python SDK reads it.
+ * `text` as `YYYY-MM-DDTHH:MM:SS.mmmZ` in UTC, the form records carry, or `undefined` if it is not a
+ * timestamp. Effective dates are compared with decision times as strings, which is only right when
+ * both are in this one fixed-width form: `2026-10-01T00:00:00+05:30` sorts after
+ * `2026-09-30T19:00:00Z` as text although it is earlier. A timestamp without an offset is UTC.
+ * Impossible dates and times are refused here, as Python refuses them, rather than rolled over.
+ */
+export function utcInstant(text) {
+  const match = typeof text === "string" ? TIMESTAMP.exec(text) : null;
+  if (!match) return undefined;
+  const [year, month, day, hour, minute, second] = match.slice(1, 7).map(Number);
+  const millis = Number(`${match[7] ?? ""}000`.slice(0, 3));
+  if (month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59) return undefined;
+  // Not Date.UTC: it reads years 0 to 99 as 1900 to 1999.
+  const parts = new Date(0);
+  parts.setUTCFullYear(year, month - 1, day);
+  parts.setUTCHours(hour, minute, second, millis);
+  if (parts.getUTCFullYear() !== year || parts.getUTCMonth() !== month - 1 || parts.getUTCDate() !== day) return undefined;
+  const local = parts.getTime();
+  const offset = match[8] ?? "Z";
+  let shift = 0;
+  if (offset !== "Z") {
+    const hours = Number(offset.slice(1, 3));
+    const minutes = Number(offset.slice(4, 6));
+    if (hours > 23 || minutes > 59) return undefined;
+    shift = (offset[0] === "-" ? -1 : 1) * (hours * 60 + minutes) * 60_000;
+  }
+  const utc = new Date(local - shift);
+  // Python's datetime holds years 1 to 9999 only; refuse what it cannot, so the SDKs agree.
+  if (utc.getUTCFullYear() < 1 || utc.getUTCFullYear() > 9999) return undefined;
+  return utc.toISOString();
+}
+
+/** A decision time in the comparable form; refuses rather than compare something else as text. */
+function instant(at) {
+  const normalised = utcInstant(at);
+  if (normalised === undefined) throw new RangeError(`not a timestamp: ${JSON.stringify(at)}`);
+  return normalised;
+}
+
+/**
+ * A date or timestamp from a policy file, in the form `utcInstant()` returns. A bare `2026-10-01`
+ * becomes `2026-10-01T00:00:00.000Z`, as the Python SDK reads it.
  */
 function asDate(name, value, field) {
   if (value === undefined || value === null) return undefined;
-  let text = value instanceof Date ? value.toISOString() : String(value).trim();
-  if (!text) return undefined;
-  if (text.length === 10) text = `${text}T00:00:00Z`;
-  if (!/^\d{4}-\d{2}-\d{2}T/.test(text) || Number.isNaN(Date.parse(text))) {
-    throw new PolicyError(`${name}: ${field} is not a date or timestamp: ${JSON.stringify(value)}`);
+  if (value instanceof Date) {
+    const normalised = Number.isNaN(value.getTime()) ? undefined : utcInstant(value.toISOString());
+    if (normalised === undefined) throw new PolicyError(`${name}: ${field} is not a date or timestamp: ${JSON.stringify(value)}`);
+    return normalised;
   }
-  return text;
+  const text = String(value).trim();
+  if (!text) return undefined;
+  const normalised = utcInstant(text.length === 10 ? `${text}T00:00:00Z` : text);
+  if (normalised === undefined) throw new PolicyError(`${name}: ${field} is not a date or timestamp: ${JSON.stringify(value)}`);
+  return normalised;
 }
 
 const dated = (policy) => policy.effectiveFrom !== undefined || policy.effectiveTo !== undefined;
@@ -185,7 +232,7 @@ function overlaps(a, b) {
 /** No moment given means the version in force now. Candidates are newest first. */
 function inForce(candidates, at) {
   if (!candidates) return undefined;
-  const moment = at ?? new Date().toISOString();
+  const moment = at === undefined ? new Date().toISOString() : instant(at);
   return candidates.find((policy) => covers(policy, moment));
 }
 

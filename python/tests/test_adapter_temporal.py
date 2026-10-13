@@ -214,7 +214,7 @@ def test_record_ids_are_deterministic_so_a_resent_record_is_not_written_twice(le
         assert store.count() == 1
     finally:
         store.close()
-    assert deterministic_ulid(1758000000000, "ns|wf|run|3|1") == deterministic_ulid(1758000000000, "ns|wf|run|3|1")
+    assert deterministic_ulid(1758000000000, "k") == "01K58FEB00G9AC6AD9518FDN9S", "the same value js/test/adapter-temporal.test.js pins"
     assert deterministic_ulid(1758000000000, "ns|wf|run|3|1") != deterministic_ulid(1758000000000, "ns|wf|run|3|2")
 
 

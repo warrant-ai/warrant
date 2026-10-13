@@ -240,8 +240,10 @@ classes: [aml.alert.disposition]
 effective_from: 2026-10-01      # the previous version carries effective_to: 2026-10-01
 ```
 
-Several dated versions of the same policy now live in one bundle. Two versions whose windows
-overlap is a load error, because then neither answer is right.
+A bare date is midnight UTC. A timestamp with an offset (`2026-10-01T00:00:00+05:30`) is converted
+to UTC, and one without an offset is UTC, so a boundary written in IST takes effect at 18:30 UTC the
+evening before. Several dated versions of the same policy now live in one bundle. Two versions whose
+windows overlap is a load error, because then neither answer is right.
 
 This is what makes replaying history honest. A decision made in June, replayed in March after the
 auto-close threshold was raised, is still evaluated against June's policy:

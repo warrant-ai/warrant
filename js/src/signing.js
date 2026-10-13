@@ -33,7 +33,7 @@ function b64(value, what, length) {
 }
 
 function parseTs(value, what) {
-  const t = typeof value === "string" ? Date.parse(value) : NaN;
+  const t = typeof value === "string" ? Date.parse(value) : Number.NaN;
   if (Number.isNaN(t)) throw new SigningError(`${what} is not ISO 8601: ${JSON.stringify(value)}`);
   return t;
 }
