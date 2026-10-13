@@ -1,0 +1,284 @@
+"""Workflow-side helpers for the Temporal adapter: explicit decisions and approvals from workflow code.
+
+With ``WarrantPlugin`` on the worker, import this module like any other. Without the plugin,
+import it inside ``workflow.unsafe.imports_passed_through()``: the worker's interceptor must see
+the same module object as the workflow code, and the SDK it belongs to is not written to be
+re-imported under the workflow sandbox.
+
+    from warrant.adapters import temporal_workflow as warrant
+
+    @workflow.defn
+    class LoanApproval:
+        @workflow.run
+        async def run(self, loan):
+            verdict = await warrant.decide("credit.approve", subject=loan.id, inputs={...},
+                                           action="approve", summary=result.reason)
+            try:
+                return await workflow.execute_activity(disburse, loan, start_to_close_timeout=...)
+            except ActivityError as exc:
+                escalated = warrant.escalation(exc)
+                if escalated is None:
+                    raise
+                await workflow.wait_condition(lambda: self.review is not None, timeout=timedelta(days=2))
+                if self.review.approve:
+                    return await warrant.approved(disburse, loan, reviewer=self.review.reviewer,
+                                                  record_id=escalated["record_id"], start_to_close_timeout=...)
+                await warrant.rejected(escalated["record_id"], reviewer=self.review.reviewer, note=self.review.reason)
+
+Everything here is deterministic: ids come from ``workflow.uuid4()`` and the run's start time, and
+records are written by the ``warrant.record`` local activity, whose result Temporal keeps in
+history so replay never writes twice. Because ``decide()`` schedules a local activity, adding a call
+to a workflow type that already has open executions is a workflow change like any other: put it
+behind ``workflow.patched`` or use Worker Versioning. A workflow written with it needs neither.
+"""
+
+from __future__ import annotations
+
+import contextvars
+from datetime import timedelta
+from typing import Any, Callable, Dict, FrozenSet, List, Mapping, Optional, Sequence
+
+from temporalio import workflow
+from temporalio.common import RetryPolicy
+from temporalio.exceptions import ActivityError, ApplicationError
+from temporalio.worker import StartActivityInput, StartLocalActivityInput, WorkflowInboundInterceptor, WorkflowOutboundInterceptor
+
+from warrant.adapters._core import MAX_EVIDENCE, as_evidence_content
+from warrant.hashing import content_hash
+from warrant.ids import ULID_RE, deterministic_ulid
+
+RECORD_ACTIVITY = "warrant.record"
+"""Name of the local activity that writes workflow-side records; register ``WarrantInterceptor.record_activity``."""
+APPROVAL_HEADER = "warrant-approval"
+EVIDENCE_HEADER = "warrant-evidence"
+DENIED = "WarrantDenied"
+ESCALATED = "WarrantEscalated"
+UNREADABLE = "WarrantUnreadable"
+
+_RECORD_TIMEOUT = timedelta(seconds=30)
+_RECORD_RETRY = RetryPolicy(maximum_attempts=3)
+_pending: contextvars.ContextVar[Optional[Dict[str, Any]]] = contextvars.ContextVar("warrant_pending_approval", default=None)
+_unset = object()
+
+
+def blocked(exc: BaseException) -> Optional[Dict[str, Any]]:
+    """The details of a decision the gate blocked (``WarrantDenied`` or ``WarrantEscalated``), else ``None``.
+
+    The details carry ``record_id``, ``result``, ``decision_class``, ``subject``, ``policy_id``, ``clause``, ``reason``.
+    """
+    cause = exc.cause if isinstance(exc, ActivityError) else exc
+    if isinstance(cause, ApplicationError) and cause.type in (DENIED, ESCALATED) and cause.details:
+        detail = cause.details[0]
+        return dict(detail) if isinstance(detail, Mapping) else None
+    return None
+
+
+def escalation(exc: BaseException) -> Optional[Dict[str, Any]]:
+    """The details of an escalated decision, else ``None``. A denial is not an escalation: nobody can approve it."""
+    detail = blocked(exc)
+    return detail if detail is not None and detail.get("result") == "escalate" else None
+
+
+async def decide(
+    decision_class: str,
+    *,
+    subject: str,
+    inputs: Mapping[str, Any],
+    action: str,
+    summary: Optional[str] = None,
+    alternatives: Optional[Sequence[str]] = None,
+    on_behalf_of: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Record a decision the workflow itself makes, and return the mandate's verdict to branch on.
+
+    Allowed (or unchecked) decisions are recorded as acted with ``action``; denied and escalated
+    ones as withheld. The returned dict has ``result``, ``policy_id``, ``policy_version``,
+    ``clause``, ``reason``, ``flagged``, ``status`` and ``record_id``.
+    """
+    if not isinstance(subject, str) or not subject:
+        raise ValueError("subject must be a non-empty string")
+    if not isinstance(action, str) or not action:
+        raise ValueError("action must be a non-empty string")
+    if not isinstance(inputs, Mapping):
+        raise TypeError("inputs must be a mapping of policy input names to values")
+    request = {
+        "kind": "decision",
+        "record_id": _record_id("wf"),
+        "decision_class": decision_class,
+        "subject": subject,
+        "inputs": dict(inputs),
+        "action": action,
+        "summary": summary,
+        "alternatives": list(alternatives) if alternatives else None,
+        "on_behalf_of": on_behalf_of,
+        "identity": _identity(),
+    }
+    return await workflow.execute_local_activity(
+        RECORD_ACTIVITY, request, start_to_close_timeout=_RECORD_TIMEOUT, retry_policy=_RECORD_RETRY,
+        summary=f"warrant: {decision_class} for {subject}",
+    )
+
+
+async def approved(activity: Any, arg: Any = _unset, *, args: Sequence[Any] = (), reviewer: str, record_id: str, note: Optional[str] = None, **options: Any) -> Any:
+    """Run an escalated activity now that a person has approved it.
+
+    ``reviewer`` is who approved, from your own Update or Signal payload; ``record_id`` is the
+    escalated decision's, from ``escalation(exc)``. The reviewer's verdict is appended to the
+    ledger as its own sealed record before the activity runs, and the activity's record names the
+    reviewer. ``options`` are ``workflow.start_activity`` keyword arguments (timeouts, retry policy).
+    """
+    _require_text(reviewer, "reviewer")
+    if not isinstance(record_id, str) or not ULID_RE.match(record_id):
+        raise ValueError("record_id must be the escalated decision's record id")
+    approval = {"record_id": record_id, "reviewer": reviewer, "note": note}
+    token = _pending.set(approval)
+    try:
+        handle = workflow.start_activity(activity, args=args, **options) if arg is _unset else workflow.start_activity(activity, arg, args=args, **options)
+        attached = _pending.get() is None
+    finally:
+        _pending.reset(token)
+    if not attached:
+        handle.cancel()
+        raise RuntimeError(
+            "the approval was not attached to the activity: import warrant.adapters.temporal_workflow inside "
+            "workflow.unsafe.imports_passed_through() and add the WarrantInterceptor to the worker's interceptors"
+        )
+    return await handle
+
+
+async def verdict(record_id: str, *, reviewer: str, verdict: str, note: Optional[str] = None) -> Dict[str, Any]:
+    """Record a person's verdict on a decision that was routed to them, as a linked record.
+
+    Use this when the decision was already written — by ``decide()`` or by a model adapter — and a
+    reviewer then approved, rejected or amended it. The reviewer's name comes from the
+    application's own signal or update; Warrant records who it was told, and never authenticates
+    them. That is the application's job, or the console's.
+    """
+    _require_text(reviewer, "reviewer")
+    if verdict not in ("approve", "reject", "amend"):
+        raise ValueError("verdict must be approve, reject or amend")
+    if not isinstance(record_id, str) or not ULID_RE.match(record_id):
+        raise ValueError("record_id must be the decision's record id")
+    request = {
+        "kind": "verdict",
+        "record_id": _record_id("verdict"),
+        "decision_record_id": record_id,
+        "reviewer": reviewer,
+        "verdict": verdict,
+        "note": note,
+    }
+    return await workflow.execute_local_activity(
+        RECORD_ACTIVITY, request, start_to_close_timeout=_RECORD_TIMEOUT, retry_policy=_RECORD_RETRY,
+        summary=f"warrant: {verdict} verdict on {record_id}",
+    )
+
+
+async def rejected(record_id: str, *, reviewer: str, note: Optional[str] = None) -> Dict[str, Any]:
+    """Record that a person rejected an escalated decision, or that the wait for one timed out."""
+    return await verdict(record_id, reviewer=reviewer, verdict="reject", note=note)
+
+
+class WarrantWorkflowInbound(WorkflowInboundInterceptor):
+    """Installed by ``WarrantInterceptor``; carries the run's evidence and any approval to the decision activity as headers.
+
+    The evidence is kept in workflow state, not in worker memory, so a decision cites the results
+    of activities that ran on other workers, and a replay on any worker rebuilds it.
+    """
+
+    decisions: FrozenSet[str] = frozenset()
+    is_evidence: Callable[[str], bool] = staticmethod(lambda _activity_type: False)
+
+    @classmethod
+    def bound(cls, decisions: Sequence[str], is_evidence: Callable[[str], bool]) -> type:
+        """This class with the worker's decision activity types and evidence filter."""
+        return type(cls.__name__, (cls,), {"decisions": frozenset(decisions), "is_evidence": staticmethod(is_evidence)})
+
+    def init(self, outbound: WorkflowOutboundInterceptor) -> None:
+        super().init(_Outbound(outbound, self.decisions, self.is_evidence))
+
+
+class _Outbound(WorkflowOutboundInterceptor):
+    def __init__(self, next: WorkflowOutboundInterceptor, decisions: FrozenSet[str], is_evidence: Callable[[str], bool]) -> None:
+        super().__init__(next)
+        self._decisions = decisions
+        self._is_evidence = is_evidence
+        # Results of this run's evidence activities since the last decision, as hashes.
+        self._evidence: List[Dict[str, str]] = []
+
+    def start_activity(self, input: StartActivityInput) -> Any:
+        approval = _pending.get()
+        if approval is not None:
+            _pending.set(None)
+            input.headers = {**input.headers, APPROVAL_HEADER: workflow.payload_converter().to_payload(approval)}
+        return self._track(input, self.next.start_activity)
+
+    def start_local_activity(self, input: StartLocalActivityInput) -> Any:
+        return self._track(input, self.next.start_local_activity)
+
+    def _track(self, input: Any, start: Callable[[Any], Any]) -> Any:
+        if input.activity in self._decisions:
+            cited = list(self._evidence)
+            if cited:
+                input.headers = {**input.headers, EVIDENCE_HEADER: workflow.payload_converter().to_payload(cited)}
+            handle = start(input)
+            handle.add_done_callback(lambda done: self._consume(done, cited))
+        elif input.activity != RECORD_ACTIVITY and self._is_evidence(input.activity):
+            handle = start(input)
+            handle.add_done_callback(lambda done: self._add(done, input.activity, input.activity_id))
+        else:
+            handle = start(input)
+        return handle
+
+    def _add(self, done: Any, activity_type: str, activity_id: Optional[str]) -> None:
+        if done.cancelled() or done.exception() is not None:
+            return
+        activity_id = activity_id or _default_activity_id(done)
+        uri = f"tool://{activity_type}#{activity_id}" if activity_id else f"tool://{activity_type}"
+        self._evidence.append({"name": activity_type, "uri": uri, "content_hash": content_hash(as_evidence_content(done.result()))})
+        del self._evidence[:-MAX_EVIDENCE]
+
+    def _consume(self, done: Any, cited: List[Dict[str, str]]) -> None:
+        # A decision that ran or was withheld has cited the evidence. One that failed for any other
+        # reason leaves it for the next decision, as a failed attempt does for its retry.
+        if done.cancelled():
+            return
+        exc = done.exception()
+        if exc is not None and blocked(exc) is None:
+            return
+        self._evidence = [item for item in self._evidence if item not in cited]
+
+
+def _default_activity_id(handle: Any) -> Optional[str]:
+    """The id the SDK gave an activity the workflow did not name: its sequence number, read once it finished.
+
+    The SDK assigns it after interceptors run, and a local activity that backs off takes a new
+    sequence number without passing through them again, so counting starts here drifts. The handle
+    holds the number the last attempt ran under. There is no public accessor; if this private field
+    goes, the evidence names the activity type without an id rather than a guessed one.
+    """
+    seq = getattr(handle, "_seq", None)
+    return str(seq) if isinstance(seq, int) and not isinstance(seq, bool) else None
+
+
+def _record_id(tag: str) -> str:
+    """Deterministic across a retried workflow task, which runs its local activities again at a later
+    ``workflow.now()``: the start time from the workflow's initialization and the run's seeded ``uuid4()``
+    are the same on the retry, so the store's duplicate check sees the repeat. Not ``info.start_time``:
+    that is the first task's start, which a retried first task changes. The run id keeps runs apart."""
+    info = workflow.info()
+    ts_ms = int(info.workflow_start_time.timestamp() * 1000)
+    return deterministic_ulid(ts_ms, f"{info.namespace}|{info.workflow_id}|{info.run_id}|{tag}|{workflow.uuid4()}")
+
+
+def _identity() -> Dict[str, Any]:
+    info = workflow.info()
+    return {
+        "namespace": info.namespace, "workflow_type": info.workflow_type, "workflow_id": info.workflow_id,
+        "workflow_run_id": info.run_id, "first_execution_run_id": info.first_execution_run_id,
+        "task_queue": info.task_queue, "attempt": info.attempt,
+    }
+
+
+def _require_text(value: Any, name: str) -> None:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{name} must be a non-empty string")
