@@ -9,7 +9,7 @@ A few Warrant terms, since some collide with Temporal's:
 - **Evidence** is what a record cites: the results of the run's earlier activities, by hash, and the workflow execution itself, so an auditor can open the run in the Temporal UI.
 - A policy check returns **allow**, **deny** or **escalate**. Escalate means a person has to approve before the activity runs.
 
-Workflow code does not change. The policy check runs in-process on the worker; recording is asynchronous and never blocks an activity.
+Gating and recording activities needs no change to workflow code. Handling an escalation, or recording a decision made in workflow code, uses the helpers described below. The policy check runs in-process on the worker; recording is asynchronous and never blocks an activity.
 
 | | Python | TypeScript |
 |---|---|---|
@@ -55,7 +55,7 @@ Without the plugin: `interceptors=[guard]`, add `guard.record_activity` to `acti
 3. `allow` and `unchecked` run the activity unchanged. Afterwards the decision is recorded as acted, with the results of the run's earlier activities since the last decision attached as evidence by hash, the model usage reported through `model_usage()` as cost, and the Temporal execution (namespace, workflow, run, activity, attempt) as a `temporal.execution` evidence item so an auditor can open the run.
 4. An activity that raises is recorded as a failed decision. Its error text is never recorded; it can carry customer data.
 
-How the evidence reaches the decision: the workflow outbound interceptor sees each activity's result in workflow code, keeps its hash in workflow state, and attaches the hashes collected since the last decision to the decision activity's start as a `warrant-evidence` header. Nothing is held in worker memory, so the evidence reaches the decision on whichever worker runs it, and a replay on any worker rebuilds the same state. A decision that runs or is withheld uses up the evidence; one that fails outright leaves it for the next decision. Each item names the activity type and its activity id; when the workflow does not set an id, that is the SDK's default, the activity's sequence number in the run. If the worker running the workflow has no Warrant interceptor, there is no header, and the decision records no evidence rather than an incomplete list.
+How the evidence reaches the decision: the workflow outbound interceptor sees each activity's result in workflow code, keeps its hash in workflow state, and attaches the hashes collected since the last decision to the decision activity's start as a `warrant-evidence` header. Nothing is held in worker memory, so the evidence reaches the decision on whichever worker runs it, and a replay on any worker rebuilds the same state. A decision that runs or is withheld uses up the evidence; one that fails outright leaves it for the next decision. Each item names the activity type and its activity id. When the workflow sets an id, that is the id. When it does not, the SDK assigns one after interceptors run, so the Python adapter reads it from the activity's handle once the activity has finished: a local activity that backs off is rescheduled under a new id, and only the finished handle has the one its last attempt ran under. The SDK offers no public accessor for it; if the private field it is read from ever disappears, the item names the activity type without an id rather than a guessed one. The TypeScript SDK passes the id to the interceptor on every scheduling, including after a backoff, so it is read there. If the worker running the workflow has no Warrant interceptor, there is no header, and the decision records no evidence rather than an incomplete list.
 
 One record per attempt. The record id is derived from the attempt's identity (`deterministic_ulid(current_attempt_scheduled_time, namespace|workflow|run|activity|attempt)`), so a retry is a new record and a batch delivered twice is written once.
 
@@ -83,7 +83,7 @@ class LoanApproval:
 
 `decide()` writes through the `warrant.record` local activity, so the record and the verdict are in history and a replay never writes twice. Its ids come from `workflow.now()` and `workflow.uuid4()`, both deterministic. The local activity carries a summary (`warrant: <class> for <subject>`) for the Temporal UI.
 
-**Adding `decide()` to a workflow that already has open executions.** `decide()` schedules a local activity, so adding a call to an existing workflow type changes the commands it produces, and open executions would fail replay with a non-determinism error. Treat it like any other workflow change: put the new call behind `workflow.patched(...)` or use Worker Versioning. A workflow written with `decide()` from the start needs neither. To check a change before deploying it, replay histories captured from open executions against the new build with `Replayer`; that catches a missing patch, which a static check cannot, since only the histories show whether open executions exist. The activity-side interceptor schedules no commands, so adding the plugin to a worker needs no versioning at all.
+**Adding `decide()` to a workflow that already has open executions.** `decide()` schedules a local activity, so adding a call to an existing workflow type changes the commands it produces, and open executions would fail replay with a non-determinism error. Treat it like any other workflow change: put the new call behind `workflow.patched(...)` or use Worker Versioning. A workflow written with `decide()` from the start needs neither. To check a change before deploying it, replay histories captured from open executions against the new build with `Replayer`; that catches a missing patch, which a static check cannot, since only the histories show whether open executions exist. The plugin schedules no commands of its own: the activity-side interceptor runs on the activity worker, and the workflow-side interceptor only adds headers to activity starts. So adding the plugin to a worker needs no versioning, and neither does removing it from a workflow that does not call the helpers above (those schedule the `warrant.record` local activity, which the plugin registers). In Python this is tested both ways: a history recorded without the plugin replays on a worker with it, and the reverse.
 
 Approvals use context propagation: `approved()` sets the approval on a context variable, the workflow outbound interceptor turns it into one `warrant-approval` header on the activity start, and the activity interceptor writes the reviewer's verdict as its own sealed record, linked to the escalated decision, before the activity runs. The reviewer's name comes from the application's own Update or Signal; Warrant records who it was told and never authenticates them. A denial is not an escalation: nobody can approve it.
 
@@ -94,7 +94,7 @@ When an activity calls a decision model through `warrant.adapters.model.Decision
 ## TypeScript
 
 ```
-npm install warrantai @temporalio/activity
+npm install warrantai @temporalio/activity @temporalio/workflow
 ```
 
 ```js
@@ -125,6 +125,8 @@ Everything below runs in CI on every push and pull request, and on a weekly sche
 - record ids are deterministic, so a re-sent record is not written twice
 - arguments are read by name or from a single dataclass
 - the evidence reaches a decision that runs on a different worker from the activities it cites: three workers, each with its own interceptor, as separate processes would have; the run then replays cleanly
+- the evidence names the activity id Temporal assigned, for an activity the workflow named, one it did not, and a local activity that backed off twice and so ran under a later id
+- a history recorded without the plugin replays on a worker with it, and the reverse
 - with no interceptor on the worker that runs the workflow, a decision records no evidence
 - a decision that fails on every attempt leaves the evidence for the next decision
 - a workflow-side decision is recorded through the local activity, and a replay of the finished history writes nothing. The replay runs against a later build of the workflow that adds a second `decide()` behind `workflow.patched`, which is the upgrade case described above
@@ -133,13 +135,13 @@ Everything below runs in CI on every push and pull request, and on a weekly sche
 - the plugin installs the interceptor, the record activity and the sandbox passthrough on a worker given none of them, and a replay through `Replayer(plugins=[...])` writes nothing
 - the plugin does not double a guard also given as an interceptor
 
-**Integration tests, TypeScript** (`js/test/adapter-temporal.test.js`, workflow bundled from `test/temporal-workflows.js`), Node 20 and 22, `@temporalio/*` 1.24: the same activity-side cases; the evidence reaching a decision on another worker (three workers, each with its own plugin) and the run replaying through `Worker.runReplayHistory` with the plugin; no evidence without the workflow module; a decision that fails outright leaving the evidence for the next; an undecodable evidence header blocking the decision; the workflow-side hash equal to `contentHash` on 500 random values; SHA-256 against `node:crypto` on every length to 300 bytes and on 1 MiB; record-id parity with Python pinned to a constant; and the plugin on a worker given no interceptors.
+**Integration tests, TypeScript** (`js/test/adapter-temporal.test.js`, workflow bundled from `test/temporal-workflows.js`), Node 20 and 22, `@temporalio/*` 1.24: the same activity-side cases; the evidence reaching a decision on another worker (three workers, each with its own plugin) and the run replaying through `Worker.runReplayHistory` with the plugin; the evidence naming the activity id Temporal assigned, including after a local activity backs off; no evidence without the workflow module; a decision that fails outright leaving the evidence for the next; an undecodable evidence header blocking the decision; the workflow-side hash equal to `contentHash` on 500 random values; SHA-256 against `node:crypto` on every length to 300 bytes and on 1 MiB; record-id parity with Python pinned to a constant; and the plugin on a worker given no interceptors.
 
 **Side effects on replay.** The only side effect the adapter has in workflow code is the record write, and it is a local activity whose result Temporal keeps in history. The evidence hashes are computed from activity results already in history. The replay tests above assert the record count after the replay.
 
 **Cross-language and record integrity**, every run: 20,000 random records sealed in Python and verified in JavaScript and the reverse; the conformance vectors for hashes, seals, signatures and Merkle proofs; the shared policy cases both CEL engines must evaluate identically.
 
-**Versions this document was checked against:** `temporalio` 1.34.0 and `@temporalio/worker` 1.24.0, on 12 October 2026.
+**Versions this document was checked against:** `temporalio` 1.34.0 and `@temporalio/worker` 1.24.0, on 13 October 2026.
 
 ## Open
 
@@ -147,4 +149,6 @@ Everything below runs in CI on every push and pull request, and on a weekly sche
 - Nexus operations as decisions, with the caller citing the handler's record: [#7](https://github.com/warrant-ai/warrant/issues/7)
 - A worked example with a `temporalio.contrib` agent integration: [#10](https://github.com/warrant-ai/warrant/issues/10)
 
-Questions we would like a Temporal engineer's view on: whether hashing activity results inside a workflow outbound interceptor is sound, given the result has been decoded by the payload converter by then; and whether there is a supported way for an outbound interceptor to read the activity id the SDK assigns, rather than mirroring its sequence number.
+What the evidence hash covers: the activity's result as the workflow receives it, after the payload converter (and any codec) has decoded it, not the payload bytes in history. That is deliberate. With an encrypting codec, history holds only ciphertext, and the decoded value is the same on every replay. An auditor matching a hash to a result in the Temporal UI has to decode the payload first.
+
+Open question for Temporal: a supported way for a workflow outbound interceptor to read the id the SDK assigns to an activity the workflow did not name. The Python adapter reads it from a private field of the activity handle, and a test fails if that stops matching the id Temporal reports.

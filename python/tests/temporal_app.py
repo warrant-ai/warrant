@@ -71,6 +71,19 @@ async def disburse_loan(loan: Loan) -> str:
     return f"disbursed {loan.loan_id}"
 
 
+@activity.defn
+async def lookup_flaky(loan: Loan) -> str:
+    """Fails twice, so with a short local retry threshold each retry is a backoff: a new sequence number."""
+    if activity.info().attempt < 3:
+        raise RuntimeError("lookup unavailable")
+    return activity.info().activity_id
+
+
+@activity.defn
+async def whoami(loan: Loan) -> str:
+    return activity.info().activity_id
+
+
 @workflow.defn
 class LoanWorkflow:
     def __init__(self) -> None:
@@ -153,3 +166,18 @@ class SpreadLoanWorkflow:
     async def run(self, loan: Loan) -> str:
         await workflow.execute_activity(underwrite, loan, task_queue="lending-bureau", start_to_close_timeout=TIMEOUT, retry_policy=RETRY)
         return await workflow.execute_activity(disburse_loan, loan, task_queue="lending-payments", start_to_close_timeout=TIMEOUT, retry_policy=RETRY)
+
+
+@workflow.defn
+class BackoffLoanWorkflow:
+    """A local activity that backs off twice, then an activity, then the decision. Returns the ids Temporal assigned."""
+
+    @workflow.run
+    async def run(self, loan: Loan) -> Dict[str, Any]:
+        backoff = RetryPolicy(initial_interval=timedelta(seconds=2), backoff_coefficient=1.0, maximum_attempts=5)
+        looked_up = await workflow.execute_local_activity(lookup_flaky, loan, start_to_close_timeout=TIMEOUT,
+                                                          local_retry_threshold=timedelta(seconds=1), retry_policy=backoff)
+        checked = await workflow.execute_activity(whoami, loan, start_to_close_timeout=TIMEOUT, retry_policy=RETRY)
+        named = await workflow.execute_activity(whoami, loan, activity_id="bureau-check", start_to_close_timeout=TIMEOUT, retry_policy=RETRY)
+        result = await workflow.execute_activity(disburse_loan, loan, start_to_close_timeout=TIMEOUT, retry_policy=RETRY)
+        return {"ids": [looked_up, checked, named], "result": result}

@@ -60,6 +60,13 @@ function activities(modelUsage, Context) {
     async disburseOpaque() {
       return "should not run";
     },
+    async lookupFlaky() {
+      if (Context.current().info.attempt < 3) throw new Error("lookup unavailable");
+      return Context.current().info.activityId;
+    },
+    async whoami() {
+      return Context.current().info.activityId;
+    },
   };
 }
 
@@ -188,6 +195,31 @@ test("the evidence reaches a decision that runs on another worker, and the run r
   // The hash Python computes for the same result (python/tests/test_adapter_temporal.py), so either SDK can produce or read the header.
   assert.equal(underwrite.content_hash, contentHash({ loan_id: "LN-1", band: "A" }));
   await w.close();
+});
+
+test("evidence names the activity id Temporal assigned, even after a local activity backs off", { skip }, async () => {
+  const { TestWorkflowEnvironment, Worker, activity, adapter } = await load();
+  const { w, records } = await ledger();
+  const plugin = () => adapter.warrantPlugin(w, { disburse: DISBURSE(adapter) });
+  const env = await TestWorkflowEnvironment.createTimeSkipping();
+  try {
+    const workflowsPath = fileURLToPath(new URL("./temporal-workflows.js", import.meta.url));
+    const worker = await Worker.create({ connection: env.nativeConnection, taskQueue: "lending-backoff", workflowsPath,
+      activities: activities(adapter.modelUsage, activity.Context), plugins: [plugin()] });
+    const workflowId = `loan-${Date.now()}-${Math.random()}`;
+    const out = await worker.runUntil(env.client.workflow.execute("backoffLoanWorkflow", { args: [GOOD], taskQueue: "lending-backoff", workflowId }));
+    const history = await env.client.workflow.getHandle(workflowId).fetchHistory();
+    await Worker.runReplayHistory({ workflowsPath, plugins: [plugin()] }, history, workflowId);
+    const [lookedUp, checked, named] = out.ids;
+    assert.notEqual(lookedUp, "1", "the local activity backed off, so its id is not the first sequence number");
+    assert.equal(named, "bureau-check");
+    const [decision] = await records();
+    const cited = decision.evidence.map((e) => e.uri).filter((uri) => uri.startsWith("tool://") && uri.includes("#"));
+    assert.deepEqual(cited, [`tool://lookupFlaky#${lookedUp}`, `tool://whoami#${checked}`, "tool://whoami#bureau-check"]);
+  } finally {
+    await env.teardown();
+    await w.close();
+  }
 });
 
 test("without the workflow interceptor on the workflow's worker, a decision cites no evidence", { skip }, async () => {
