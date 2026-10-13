@@ -2,7 +2,7 @@
 
 Warrant is the decision ledger for AI agents. Every consequential action an agent takes is recorded with the mandate that allowed it, the evidence it used, what it cost, and how it turned out. Developers replay real recorded decisions against a changed prompt, model or policy before shipping. Risk, finance and audit teams get records they can sample and verify without trusting the vendor.
 
-This package is the JavaScript and TypeScript SDK. It records decisions to a Warrant collector. The local store, policy bundles, replay and import live in the [Python package](https://pypi.org/project/warrantai/); both write the same record format, and the collector seals records from either into the same chain.
+This package is the JavaScript and TypeScript SDK. It records decisions, evidence, costs, outcomes and human verdicts, applies policy bundles and the admissibility rules, and delivers records to a Warrant collector. The local store and replay are Python only, in the [Python package](https://pypi.org/project/warrantai/); both write the same record format, and the collector seals records from either into the same chain.
 
 ```
 npm install warrantai
